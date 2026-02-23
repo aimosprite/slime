@@ -1,7 +1,10 @@
 #!/bin/bash
+#SBATCH --job-name=slime-prep
+#SBATCH --output=slurm-prep-%j.out
+#SBATCH --error=slurm-prep-%j.out
 
 # =============================================================================
-# Prep script for Qwen3-32B -> Qwen3-8B On-Policy Distillation (FSDP backend)
+# Prep script for Qwen3-32B -> Qwen3-8B On-Policy Distillation
 #
 # MANUAL STEPS TO DO BEFORE RUNNING THIS SCRIPT (in order):
 #
@@ -14,13 +17,34 @@
 # 3. Set up .env with WANDB_API_KEY if using wandb
 #
 # After running this script, you can run:
-#    bash examples/on_policy_distillation/run-qwen3-8B-opd-fsdp.sh
+#    bash examples/on_policy_distillation/run-qwen3-8B-opd.sh
 # =============================================================================
 
 set -ex
 
 ROOT_DIR="/home/rohin"
 POOL_DIR="${ROOT_DIR}/orcd/pool"
+MEGATRON_PATH="${MEGATRON_PATH:-/root/Megatron-LM}"
+if [ ! -d "${MEGATRON_PATH}" ] && [ -d "${ROOT_DIR}/Megatron-LM" ]; then
+    MEGATRON_PATH="${ROOT_DIR}/Megatron-LM"
+fi
+if [ ! -d "${MEGATRON_PATH}" ]; then
+    echo "Megatron-LM path not found: ${MEGATRON_PATH}"
+    exit 1
+fi
+
+REPO_DIR="${REPO_DIR:-}"
+for candidate in "${REPO_DIR}" "/root/slime" "${ROOT_DIR}/slime"; do
+    [ -n "${candidate}" ] || continue
+    if [ -f "${candidate}/tools/convert_hf_to_torch_dist.py" ] && [ -f "${candidate}/scripts/models/qwen3-8B.sh" ]; then
+        REPO_DIR="${candidate}"
+        break
+    fi
+done
+if [ -z "${REPO_DIR}" ]; then
+    echo "Could not locate slime repo root with required scripts."
+    exit 1
+fi
 
 # ---- Download models if not already present ----
 
@@ -52,8 +76,21 @@ else
     echo "dapo-math-17k.jsonl already exists, skipping conversion."
 fi
 
+# ---- Convert HF checkpoint to Megatron torch_dist for OPD run script ----
+
+if [ ! -d "${POOL_DIR}/Qwen3-8B_torch_dist" ]; then
+    echo "Converting Qwen3-8B HF checkpoint to Megatron torch_dist..."
+    source "${REPO_DIR}/scripts/models/qwen3-8B.sh"
+    PYTHONPATH="${MEGATRON_PATH}" python3 "${REPO_DIR}/tools/convert_hf_to_torch_dist.py" \
+        "${MODEL_ARGS[@]}" \
+        --hf-checkpoint "${POOL_DIR}/Qwen3-8B" \
+        --save "${POOL_DIR}/Qwen3-8B_torch_dist"
+else
+    echo "Qwen3-8B_torch_dist already exists, skipping conversion."
+fi
+
 echo ""
 echo "========================================="
 echo "Prep complete. Ready to run:"
-echo "  bash examples/on_policy_distillation/run-qwen3-8B-opd-fsdp.sh"
+echo "  bash examples/on_policy_distillation/run-qwen3-8B-opd.sh"
 echo "========================================="

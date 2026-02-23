@@ -1,7 +1,7 @@
 #!/bin/bash -l
 #SBATCH --job-name=slime-run
-#SBATCH --output=slime-run-%j.log
-#SBATCH --error=slime-run-%j.log
+#SBATCH --output=/home/rohin/slime/examples/on_policy_distillation/slurm-run-%j.log
+#SBATCH --error=/home/rohin/slime/examples/on_policy_distillation/slurm-run-%j.log
 #SBATCH --partition=mit_preemptable
 #SBATCH --gres=gpu:h200:4
 #SBATCH --cpus-per-task=16
@@ -15,6 +15,7 @@
 set -euo pipefail
 
 module load apptainer/1.4.2
+module load cuda
 
 # Forward SIGTERM into the apptainer child so the inner script can clean up
 trap 'echo "SLURM PREEMPTION: forwarding SIGTERM to child"; kill -TERM $CHILD_PID 2>/dev/null; wait $CHILD_PID 2>/dev/null' TERM

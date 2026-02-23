@@ -9,6 +9,7 @@ MODEL_ARGS=(
    --use-rotary-position-embeddings
    --disable-bias-linear
    --normalization "RMSNorm"
+   --no-persist-layer-norm
    --norm-epsilon 1e-6
    --rotary-base "${MODEL_ARGS_ROTARY_BASE:-1000000}"
    --vocab-size 151936
@@ -16,5 +17,5 @@ MODEL_ARGS=(
    --qk-layernorm
    --untie-embeddings-and-output-weights
    --no-rope-fusion
-   --transformer-impl local
+   --transformer-impl transformer_engine
 )
