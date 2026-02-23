@@ -15,4 +15,6 @@ MODEL_ARGS=(
    --kv-channels 128
    --qk-layernorm
    --untie-embeddings-and-output-weights
+   --no-rope-fusion
+   --transformer-impl local
 )

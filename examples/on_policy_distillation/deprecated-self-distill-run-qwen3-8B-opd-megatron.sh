@@ -11,7 +11,18 @@
 
 set -ex
 
-export PYTHONBUFFERED=16
+ROOT_DIR="/home/rohin"
+NUM_GPUS=${NUM_GPUS:-2}
+
+# Load environment variables (e.g., WANDB_API_KEY)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "${SCRIPT_DIR}/../../.env" ]; then
+    set -a
+    source "${SCRIPT_DIR}/../../.env"
+    set +a
+fi
+
+export PYTHONUNBUFFERED=16
 
 NVLINK_COUNT=$(nvidia-smi topo -m 2>/dev/null | grep -o 'NV[0-9][0-9]*' | wc -l)
 if [ "$NVLINK_COUNT" -gt 0 ]; then
@@ -21,19 +32,19 @@ else
 fi
 echo "HAS_NVLINK: $HAS_NVLINK (detected $NVLINK_COUNT NVLink references)"
 
-source "/root/slime/scripts/models/qwen3-8B.sh"
+source "${ROOT_DIR}/slime/scripts/models/qwen3-8B.sh"
 
 
 CKPT_ARGS=(
-   --hf-checkpoint /root/Qwen3-8B
-   --ref-load /root/Qwen3-8B_torch_dist
-   --load /root/Qwen3-8B_slime/
-   --save /root/Qwen3-8B_slime/
+   --hf-checkpoint ${ROOT_DIR}/Qwen3-8B
+   --ref-load ${ROOT_DIR}/Qwen3-8B_torch_dist
+   --load ${ROOT_DIR}/Qwen3-8B_slime/
+   --save ${ROOT_DIR}/Qwen3-8B_slime/
    --save-interval 20
 )
 
 ROLLOUT_ARGS=(
-   --prompt-data /root/dapo-math-17k/dapo-math-17k.jsonl
+   --prompt-data ${ROOT_DIR}/dapo-math-17k/dapo-math-17k.jsonl
    --input-key prompt
    --apply-chat-template
    --rollout-shuffle
@@ -84,7 +95,7 @@ GRPO_ARGS=(
    --opd-type megatron                                # Use Megatron forward for teacher
    --opd-kl-coef 1.0                                  # CHANGE THIS: KL penalty coefficient
    # Teacher model configuration (CHANGE THIS to a stronger model!)
-   --opd-teacher-load /root/Qwen3-8B_torch_dist      # Teacher model path
+   --opd-teacher-load ${ROOT_DIR}/Qwen3-8B_torch_dist      # Teacher model path
    
    --use-kl-loss
    --kl-loss-coef 0.00
@@ -102,10 +113,10 @@ OPTIMIZER_ARGS=(
 )
 
 WANDB_ARGS=(
-   #--use-wandb
-   # --wandb-project slime-dev
-   # --wandb-group qwen3-8B-opd-megatron
-   # --wandb-key ${WANDB_KEY}
+   --use-wandb
+   --wandb-project slime-dev
+   --wandb-group qwen3-8B-opd-megatron
+   --wandb-key ${WANDB_API_KEY}
 )
 
 SGLANG_ARGS=(
@@ -127,16 +138,16 @@ MISC_ARGS=(
 
 # launch the master node of ray in container
 export MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
-ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus 8 --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
+ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus ${NUM_GPUS} --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
 
 
 ray job submit --address="http://127.0.0.1:8265" \
-   --runtime-env-json='{
-     "env_vars": {
-        "PYTHONPATH": "/root/Megatron-LM/",
-        "CUDA_DEVICE_MAX_CONNECTIONS": "1"
+   --runtime-env-json="{
+     \"env_vars\": {
+        \"PYTHONPATH\": \"${ROOT_DIR}/Megatron-LM/\",
+        \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\"
      }
-   }' \
+   }" \
    -- python3 train.py \
    --actor-num-nodes 1 \
    --actor-num-gpus-per-node 2 \
