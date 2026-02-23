@@ -45,6 +45,7 @@ fi
 
 # Load environment variables (e.g., WANDB_API_KEY)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 if [ -f "${SCRIPT_DIR}/../../.env" ]; then
     set -a
     source "${SCRIPT_DIR}/../../.env"
@@ -189,7 +190,7 @@ ray job submit --address="http://127.0.0.1:8265" \
         \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\"
      }
    }" \
-   -- python3 train.py \
+   -- python3 "${REPO_DIR}/train.py" \
    ${CKPT_ARGS[@]} \
    ${ROLLOUT_ARGS[@]} \
    ${OPTIMIZER_ARGS[@]} \

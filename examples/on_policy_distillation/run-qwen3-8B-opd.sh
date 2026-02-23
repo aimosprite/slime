@@ -10,25 +10,49 @@
 #
 # usage: bash examples/on_policy_distillation/run-qwen3-8B-opd.sh
 
-set -ex
+set -euxo pipefail
 
-ROOT_DIR="/home/rohin"
+ROOT_DIR="${ROOT_DIR:-/home/rohin}"
 NUM_GPUS=${NUM_GPUS:-3}   # GPUs visible to Ray (0, 1, 2); teacher uses GPU 3 separately
-POOL_DIR="${ROOT_DIR}/orcd/pool"
+if [ -z "${POOL_DIR:-}" ]; then
+    if [ -d "${ROOT_DIR}/orcd/pool" ]; then
+        POOL_DIR="${ROOT_DIR}/orcd/pool"
+    else
+        USER_POOL_DIR="$(ls -d /orcd/pool/*/"$(whoami)" 2>/dev/null | head -n 1 || true)"
+        POOL_DIR="${USER_POOL_DIR:-/orcd/pool}"
+    fi
+fi
+if [ ! -d "${POOL_DIR}" ]; then
+    echo "Pool directory not found: ${POOL_DIR}"
+    echo "Set POOL_DIR explicitly, e.g. export POOL_DIR=/orcd/pool/<bucket>/$(whoami)"
+    exit 1
+fi
+MEGATRON_PATH="${MEGATRON_PATH:-/root/Megatron-LM}"
+if [ ! -d "${MEGATRON_PATH}" ] && [ -d "${ROOT_DIR}/Megatron-LM" ]; then
+    MEGATRON_PATH="${ROOT_DIR}/Megatron-LM"
+fi
+if [ ! -d "${MEGATRON_PATH}" ]; then
+    echo "Megatron-LM path not found: ${MEGATRON_PATH}"
+    exit 1
+fi
+if [ ! -d "${POOL_DIR}/Qwen3-8B_torch_dist" ]; then
+    echo "Missing student Megatron checkpoint: ${POOL_DIR}/Qwen3-8B_torch_dist"
+    echo "Run the prep/conversion step before starting training."
+    exit 1
+fi
 
 # ---- Preemption-friendly cleanup ----
 TEACHER_PID=""
 cleanup() {
     echo "Received signal, cleaning up..."
     [ -n "$TEACHER_PID" ] && kill -TERM "$TEACHER_PID" 2>/dev/null
+    pkill -9 -f "python3 -m sglang.launch_server" 2>/dev/null || true
     pkill -9 sglang 2>/dev/null || true
     sleep 1
     ray stop --force 2>/dev/null || true
     pkill -9 ray 2>/dev/null || true
-    pkill -9 python 2>/dev/null || true
-    exit 0
 }
-trap cleanup TERM INT USR1
+trap 'cleanup; exit 0' TERM INT USR1
 
 # Download models if not already present
 if [ ! -d "${POOL_DIR}/Qwen3-32B" ]; then
@@ -43,10 +67,17 @@ fi
 
 # Load environment variables (e.g., WANDB_API_KEY)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 if [ -f "${SCRIPT_DIR}/../../.env" ]; then
     set -a
     source "${SCRIPT_DIR}/../../.env"
     set +a
+fi
+WANDB_KEY="${WANDB_API_KEY:-${WANDB_KEY:-}}"
+if [ -z "${WANDB_KEY}" ]; then
+    echo "WANDB is enabled but no API key found in environment (.env)."
+    echo "Set WANDB_API_KEY (or WANDB_KEY) before running."
+    exit 1
 fi
 
 # Start the teacher model server
@@ -68,9 +99,16 @@ TEACHER_PID=$!
 echo "Starting teacher model server..."
 
 ## Wait for the teacher model server to be ready
+MAX_TEACHER_WAIT_SEC=${MAX_TEACHER_WAIT_SEC:-300}
+teacher_waited_sec=0
 until curl -sf http://$TEACHER_IP:$TEACHER_PORT/health_generate > /dev/null; do
     echo "Waiting for the teacher model server to start..."
     tail -n 10 "$LOG_FILE"
+    teacher_waited_sec=$((teacher_waited_sec + 5))
+    if [ "${teacher_waited_sec}" -ge "${MAX_TEACHER_WAIT_SEC}" ]; then
+        echo "Teacher server did not become healthy within ${MAX_TEACHER_WAIT_SEC}s."
+        exit 1
+    fi
     sleep 5
 done
 
@@ -81,7 +119,8 @@ sleep 10
 
 export PYTHONUNBUFFERED=16
 
-NVLINK_COUNT=$(nvidia-smi topo -m 2>/dev/null | grep -o 'NV[0-9][0-9]*' | wc -l)
+TOPOLOGY_OUTPUT="$(nvidia-smi topo -m 2>/dev/null || true)"
+NVLINK_COUNT=$(printf "%s\n" "${TOPOLOGY_OUTPUT}" | awk '{for (i = 1; i <= NF; i++) if ($i ~ /^NV[0-9]+$/) c++} END {print c + 0}')
 if [ "$NVLINK_COUNT" -gt 0 ]; then
     HAS_NVLINK=1
 else
@@ -89,7 +128,29 @@ else
 fi
 echo "HAS_NVLINK: $HAS_NVLINK (detected $NVLINK_COUNT NVLink references)"
 
-source "${ROOT_DIR}/slime/scripts/models/qwen3-8B.sh"
+source "${REPO_DIR}/scripts/models/qwen3-8B.sh"
+
+DATA_DIR="${POOL_DIR}/dapo-math-17k"
+TRAIN_DATA="${DATA_DIR}/dapo-math-17k-train.jsonl"
+EVAL_DATA="${DATA_DIR}/dapo-math-17k-eval.jsonl"
+FALLBACK_DATA="${DATA_DIR}/dapo-math-17k.jsonl"
+
+if [ ! -f "${TRAIN_DATA}" ] && [ -f "${FALLBACK_DATA}" ]; then
+    echo "Training split not found; falling back to ${FALLBACK_DATA}"
+    TRAIN_DATA="${FALLBACK_DATA}"
+fi
+if [ ! -f "${EVAL_DATA}" ] && [ -f "${FALLBACK_DATA}" ]; then
+    echo "Eval split not found; falling back to ${FALLBACK_DATA}"
+    EVAL_DATA="${FALLBACK_DATA}"
+fi
+if [ ! -f "${TRAIN_DATA}" ]; then
+    echo "Missing training data file: ${TRAIN_DATA}"
+    exit 1
+fi
+if [ ! -f "${EVAL_DATA}" ]; then
+    echo "Missing eval data file: ${EVAL_DATA}"
+    exit 1
+fi
 
 
 CKPT_ARGS=(
@@ -101,7 +162,7 @@ CKPT_ARGS=(
 )
 
 ROLLOUT_ARGS=(
-   --prompt-data ${POOL_DIR}/dapo-math-17k/dapo-math-17k-train.jsonl
+   --prompt-data ${TRAIN_DATA}
    --input-key prompt
    --apply-chat-template
    --rollout-shuffle
@@ -123,7 +184,7 @@ RM_ARGS=(
 
 EVAL_ARGS=(
    --eval-interval 20
-   --eval-prompt-data eval ${POOL_DIR}/dapo-math-17k/dapo-math-17k-eval.jsonl
+   --eval-prompt-data eval ${EVAL_DATA}
    --n-samples-per-eval-prompt 4
    --eval-max-response-len 16384
    --eval-temperature 1
@@ -167,10 +228,10 @@ OPTIMIZER_ARGS=(
 )
 
 WANDB_ARGS=(
-   #--use-wandb
-   # --wandb-project slime-dev
-   # --wandb-group qwen3-8B-test
-   # --wandb-key ${WANDB_KEY}
+   --use-wandb
+   --wandb-project slime-dev
+   --wandb-group qwen3-8B-test
+   --wandb-key ${WANDB_KEY}
 )
 
 SGLANG_ARGS=(
@@ -194,17 +255,19 @@ MISC_ARGS=(
 export MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
 # Restrict Ray to GPUs 0-2 only; GPU 3 is reserved for the teacher.
 export CUDA_VISIBLE_DEVICES=0,1,2
+ray stop --force 2>/dev/null || true
 ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus ${NUM_GPUS} --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
 
 
+set +e
 ray job submit --address="http://127.0.0.1:8265" \
    --runtime-env-json="{
      \"env_vars\": {
-        \"PYTHONPATH\": \"${ROOT_DIR}/Megatron-LM/\",
+        \"PYTHONPATH\": \"${MEGATRON_PATH}\",
         \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\"
      }
    }" \
-   -- python3 train.py \
+   -- python3 "${REPO_DIR}/train.py" \
    --actor-num-nodes 1 \
    --actor-num-gpus-per-node 2 \
    --rollout-num-gpus 1 \
@@ -218,10 +281,9 @@ ray job submit --address="http://127.0.0.1:8265" \
    ${EVAL_ARGS[@]} \
    ${SGLANG_ARGS[@]} \
    ${MISC_ARGS[@]} \
-   ${RM_ARGS[@]} &
-RAY_JOB_PID=$!
-wait $RAY_JOB_PID
+   ${RM_ARGS[@]}
 RAY_EXIT_CODE=$?
+set -e
 
 
 
