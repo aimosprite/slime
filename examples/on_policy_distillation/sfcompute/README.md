@@ -5,9 +5,35 @@ This folder contains scripts for running Qwen3-8B OPD over SSH on a single 8x H1
 ## Files
 
 - `config-8xh100.env`: configurable paths and GPU layout.
+- `train-config.yaml`: training and runtime knobs (save/eval cadence, optimizer, optional checkpoint shipping).
 - `prep-qwen3-8B-opd.sh`: idempotent prep (downloads dataset/models, converts parquet to JSONL, converts student checkpoint).
 - `run-qwen3-8B-opd.sh`: launches teacher + Ray job with 8x H100 defaults.
 - `docker-run.sh`: optional wrapper for the long `docker run` prep/train commands.
+
+### Checkpoint safety on ephemeral nodes
+
+`run-qwen3-8B-opd.sh` includes a background checkpoint shipper loop and defaults to Hugging Face Hub uploads every 10 steps.
+
+Default behavior (already set in `train-config.yaml`):
+
+```yaml
+save_interval: 10
+checkpoint_ship_enabled: 1
+checkpoint_ship_backend: huggingface
+checkpoint_ship_every: 10
+checkpoint_hf_repo_basename: qwen3-8b-opd-checkpoints
+```
+
+How repo naming works:
+- If `checkpoint_hf_repo_id` is set, that repo is used directly (recommended for teams/orgs).
+- Otherwise it auto-uses `<your_hf_username>/qwen3-8b-opd-checkpoints` after `huggingface-cli login`.
+
+Optional custom backend/command:
+- Set `checkpoint_ship_cmd` to run your own uploader command (takes precedence over backend mode).
+- The command receives:
+  - `CHECKPOINT_STEP` (e.g. `10`)
+  - `CHECKPOINT_ITER_DIR` (e.g. `/root/pool/Qwen3-8B_slime/iter_0000010`)
+  - `CHECKPOINT_SAVE_DIR` (checkpoint root)
 
 ## Recommended: Docker workflow (root VM)
 

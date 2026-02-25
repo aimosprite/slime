@@ -1,0 +1,69 @@
+# Training hyperparameters for Qwen3-32B → Qwen3-8B OPD on 8x H100.
+# Edit this file to tune a run. Env vars always take precedence over values here.
+# Paths stay in config-8xh100.env; GPU layout has moved here.
+
+# ── GPU allocation ────────────────────────────────────────────────────
+# Teacher server (Qwen3-32B sglang). TEACHER_TP is auto-derived from GPU count.
+teacher_visible_gpus: 6,7
+# Ray cluster: covers both student rollout and student training GPUs.
+ray_visible_gpus: 0,1,2,3,4,5
+# Student training (gradient updates). Must satisfy: actor_num_gpus_per_node + rollout_num_gpus <= len(ray_visible_gpus).
+actor_num_gpus_per_node: 4
+# Student rollout engine (sglang within Ray).
+rollout_num_gpus: 1
+# Tensor parallel size for student training.
+tensor_model_parallel_size: 4
+# Memory fractions for the two sglang servers.
+teacher_mem_fraction: 0.6
+sglang_mem_fraction_static: 0.4
+
+# ── Training duration ─────────────────────────────────────────────────
+# num_steps controls total gradient updates.
+# With the defaults below (rollout_batch_size * n_samples_per_prompt == global_batch_size)
+# this equals num_rollout directly. Change only this to shorten/lengthen a run.
+num_steps: 100
+
+# ── Rollout ───────────────────────────────────────────────────────────
+rollout_batch_size: 16
+n_samples_per_prompt: 4
+rollout_max_response_len: 16384
+rollout_temperature: 1
+global_batch_size: 64
+
+# ── Optimizer ─────────────────────────────────────────────────────────
+learning_rate: 1e-6
+weight_decay: 0.1
+adam_beta1: 0.9
+adam_beta2: 0.98
+
+# ── Distillation / loss ───────────────────────────────────────────────
+opd_kl_coef: 1.0
+kl_loss_coef: 0.00
+entropy_coef: 0.00
+
+# ── Checkpointing ─────────────────────────────────────────────────────
+save_interval: 15
+# Optional checkpoint shipping loop (for ephemeral nodes).
+# Default backend is Hugging Face Hub and auto-creates/uploads every 10 steps.
+checkpoint_ship_enabled: 1
+checkpoint_ship_every: 15
+checkpoint_ship_poll_sec: 15
+checkpoint_ship_backend: huggingface
+# Optional override (recommended for team/shared runs):
+# checkpoint_hf_repo_id: your-org/qwen3-8b-opd-checkpoints
+checkpoint_hf_repo_basename: qwen3-8b-opd-checkpoints
+checkpoint_hf_repo_type: model
+checkpoint_hf_private: 1
+checkpoint_hf_create_repo: 1
+checkpoint_hf_upload_tracker: 1
+# Advanced/custom route (takes precedence over backend if set):
+# checkpoint_ship_cmd: aws s3 sync "$CHECKPOINT_ITER_DIR" "s3://your-bucket/qwen3-8b-opd/iter_${CHECKPOINT_STEP}/" --only-show-errors
+
+# ── Eval (only used when ENABLE_EVAL=1) ───────────────────────────────
+eval_interval: 20
+n_samples_per_eval_prompt: 4
+eval_max_response_len: 16384
+eval_temperature: 1
+
+# ── Performance ───────────────────────────────────────────────────────
+max_tokens_per_gpu: 16384
