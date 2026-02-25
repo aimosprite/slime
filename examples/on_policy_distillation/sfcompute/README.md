@@ -5,10 +5,94 @@ This folder contains scripts for running Qwen3-8B OPD over SSH on a single 8x H1
 ## Files
 
 - `config-8xh100.env`: configurable paths and GPU layout.
-- `prep-qwen3-8B-opd.sh`: runs shared prep flow using config values.
+- `prep-qwen3-8B-opd.sh`: idempotent prep (downloads dataset/models, converts parquet to JSONL, converts student checkpoint).
 - `run-qwen3-8B-opd.sh`: launches teacher + Ray job with 8x H100 defaults.
+- `docker-run.sh`: optional wrapper for the long `docker run` prep/train commands.
 
-## End-to-end commands
+## Recommended: Docker workflow (root VM)
+
+If you have root access, this is the most robust path and avoids host Python/CUDA/Transformer-Engine mismatch issues.
+
+1) Install Docker + NVIDIA container toolkit:
+
+```bash
+apt update
+apt install -y docker.io curl ca-certificates gnupg
+
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | \
+  gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+  sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+  tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+
+apt update
+apt install -y nvidia-container-toolkit
+nvidia-ctk runtime configure --runtime=docker
+systemctl restart docker
+```
+
+2) Verify GPU passthrough in Docker:
+
+```bash
+docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi
+```
+
+3) Pull slime image:
+
+```bash
+docker pull slimerl/slime:latest
+```
+
+4) Log in to Hugging Face on host (token is reused in container):
+
+```bash
+huggingface-cli login
+```
+
+5) Run prep in container (auto-downloads dataset + models):
+
+```bash
+bash examples/on_policy_distillation/sfcompute/docker-run.sh prep
+```
+
+6) Run training in container:
+
+```bash
+bash examples/on_policy_distillation/sfcompute/docker-run.sh train
+```
+
+7) (Optional) Run direct `docker run` commands instead of the wrapper:
+
+```bash
+docker run --rm --gpus all --ipc=host \
+  --ulimit memlock=-1 --ulimit stack=67108864 \
+  -v /root/slime:/root/slime \
+  -v /root/pool:/root/pool \
+  -v /root/.cache/huggingface:/root/.cache/huggingface \
+  -w /root/slime \
+  slimerl/slime:latest \
+  bash examples/on_policy_distillation/sfcompute/prep-qwen3-8B-opd.sh
+
+docker run --rm --gpus all --network host --ipc=host --shm-size=64g \
+  --ulimit memlock=-1 --ulimit stack=67108864 \
+  -v /root/slime:/root/slime \
+  -v /root/pool:/root/pool \
+  -v /root/.cache/huggingface:/root/.cache/huggingface \
+  -w /root/slime \
+  slimerl/slime:latest \
+  bash examples/on_policy_distillation/sfcompute/run-qwen3-8B-opd.sh
+```
+
+8) (Optional) prefetch dataset on host (useful if you want explicit download control):
+
+```bash
+mkdir -p /root/pool/dapo-math-17k
+huggingface-cli download BytedTsinghua-SIA/DAPO-Math-17k \
+  --repo-type dataset \
+  --local-dir /root/pool/dapo-math-17k
+```
+
+## Alternative: Native host workflow
 
 Run these commands in order.
 
@@ -87,7 +171,23 @@ cd ~/slime
 $EDITOR examples/on_policy_distillation/sfcompute/config-8xh100.env
 ```
 
-7) Download dataset parquet to `${POOL_DIR}`:
+7) Run prep (auto-downloads dataset + models, then converts):
+
+```bash
+source ~/venvs/slime/bin/activate
+cd ~/slime
+bash examples/on_policy_distillation/sfcompute/prep-qwen3-8B-opd.sh
+```
+
+8) Run training:
+
+```bash
+source ~/venvs/slime/bin/activate
+cd ~/slime
+bash examples/on_policy_distillation/sfcompute/run-qwen3-8B-opd.sh
+```
+
+9) (Optional) prefetch dataset to `${POOL_DIR}` before prep:
 
 ```bash
 source ~/venvs/slime/bin/activate
@@ -97,22 +197,6 @@ mkdir -p "${POOL_DIR}/dapo-math-17k"
 huggingface-cli download BytedTsinghua-SIA/DAPO-Math-17k \
   --repo-type dataset \
   --local-dir "${POOL_DIR}/dapo-math-17k"
-```
-
-8) Run prep:
-
-```bash
-source ~/venvs/slime/bin/activate
-cd ~/slime
-bash examples/on_policy_distillation/sfcompute/prep-qwen3-8B-opd.sh
-```
-
-9) Run training:
-
-```bash
-source ~/venvs/slime/bin/activate
-cd ~/slime
-bash examples/on_policy_distillation/sfcompute/run-qwen3-8B-opd.sh
 ```
 
 10) (Optional) run with a custom config file:
