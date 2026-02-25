@@ -1,7 +1,7 @@
 #!/bin/bash -l
 #SBATCH --job-name=slime-prep
-#SBATCH --output=/home/rohin/slime/examples/on_policy_distillation/slime-prep-%j.log
-#SBATCH --error=/home/rohin/slime/examples/on_policy_distillation/slime-prep-%j.log
+#SBATCH --output=/home/rohin/slime/examples/on_policy_distillation/engaging/slime-prep-%j.log
+#SBATCH --error=/home/rohin/slime/examples/on_policy_distillation/engaging/slime-prep-%j.log
 #SBATCH --partition=mit_normal_gpu
 #SBATCH --gres=gpu:h200:1
 #SBATCH --cpus-per-task=4

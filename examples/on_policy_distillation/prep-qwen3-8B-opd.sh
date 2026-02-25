@@ -22,9 +22,10 @@
 
 set -ex
 
-ROOT_DIR="/home/rohin"
-POOL_DIR="${ROOT_DIR}/orcd/pool"
-MEGATRON_PATH="${MEGATRON_PATH:-/root/Megatron-LM}"
+# Use env from config (e.g. sfcompute/config-8xh100.env) or sensible defaults for local VM
+ROOT_DIR="${ROOT_DIR:-$HOME}"
+POOL_DIR="${POOL_DIR:-${ROOT_DIR}/pool}"
+MEGATRON_PATH="${MEGATRON_PATH:-${ROOT_DIR}/Megatron-LM}"
 if [ ! -d "${MEGATRON_PATH}" ] && [ -d "${ROOT_DIR}/Megatron-LM" ]; then
     MEGATRON_PATH="${ROOT_DIR}/Megatron-LM"
 fi

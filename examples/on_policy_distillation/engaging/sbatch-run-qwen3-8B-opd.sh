@@ -1,7 +1,7 @@
 #!/bin/bash -l
 #SBATCH --job-name=slime-run
-#SBATCH --output=/home/rohin/slime/examples/on_policy_distillation/slurm-run-%j.log
-#SBATCH --error=/home/rohin/slime/examples/on_policy_distillation/slurm-run-%j.log
+#SBATCH --output=/home/rohin/slime/examples/on_policy_distillation/engaging/slurm-run-%j.log
+#SBATCH --error=/home/rohin/slime/examples/on_policy_distillation/engaging/slurm-run-%j.log
 #SBATCH --partition=mit_preemptable
 #SBATCH --gres=gpu:h200:4
 #SBATCH --cpus-per-task=16
