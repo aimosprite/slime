@@ -182,13 +182,20 @@ RM_ARGS=(
    --rm-url http://$TEACHER_IP:$TEACHER_PORT/generate
 )
 
-EVAL_ARGS=(
-   --eval-interval 20
-   --eval-prompt-data eval ${EVAL_DATA}
-   --n-samples-per-eval-prompt 4
-   --eval-max-response-len 16384
-   --eval-temperature 1
-)
+# Eval is disabled by default for OPD custom RM because teacher responses are dict-shaped
+# and the default eval logger expects scalar rewards.
+# Set ENABLE_EVAL=1 to turn eval back on once eval reward extraction is configured.
+ENABLE_EVAL="${ENABLE_EVAL:-0}"
+EVAL_ARGS=()
+if [ "${ENABLE_EVAL}" = "1" ]; then
+   EVAL_ARGS=(
+      --eval-interval 20
+      --eval-prompt-data eval ${EVAL_DATA}
+      --n-samples-per-eval-prompt 4
+      --eval-max-response-len 16384
+      --eval-temperature 1
+   )
+fi
 
 PERF_ARGS=(
    --tensor-model-parallel-size 2
