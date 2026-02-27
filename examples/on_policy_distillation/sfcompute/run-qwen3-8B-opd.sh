@@ -4,6 +4,7 @@ set -euxo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_DIR="$(cd "${BASE_DIR}/../.." && pwd)"
+HF_CLI=""
 # Load order: env vars > YAML > .env defaults
 # YAML is loaded first so its values are visible when .env does ${VAR:-default} checks.
 TRAIN_CONFIG="${TRAIN_CONFIG:-${SCRIPT_DIR}/train-config.yaml}"
@@ -27,6 +28,101 @@ if [ -f "${CONFIG_FILE}" ]; then
     source "${CONFIG_FILE}"
     set +a
 fi
+
+set_hf_cli() {
+    if command -v hf >/dev/null 2>&1; then
+        HF_CLI="hf"
+    elif command -v huggingface-cli >/dev/null 2>&1; then
+        HF_CLI="huggingface-cli"
+    else
+        HF_CLI=""
+    fi
+}
+
+install_hf_cli_if_missing() {
+    set_hf_cli
+    if [ -n "${HF_CLI}" ]; then
+        return 0
+    fi
+
+    echo "Installing Hugging Face CLI..."
+    python3 -m pip install -U "huggingface_hub[cli]"
+    set_hf_cli
+    if [ -z "${HF_CLI}" ]; then
+        echo "Failed to install Hugging Face CLI."
+        exit 1
+    fi
+}
+
+hf_auth_whoami() {
+    if [ "${HF_CLI}" = "hf" ]; then
+        hf auth whoami
+    else
+        huggingface-cli whoami
+    fi
+}
+
+hf_auth_login_token() {
+    local token="$1"
+    if [ -z "${token}" ]; then
+        return 1
+    fi
+
+    if [ "${HF_CLI}" = "hf" ]; then
+        hf auth login --token "${token}" --add-to-git-credential >/dev/null 2>&1 || \
+            hf auth login --token "${token}" >/dev/null 2>&1
+    else
+        huggingface-cli login --token "${token}" --add-to-git-credential >/dev/null 2>&1 || \
+            huggingface-cli login --token "${token}" >/dev/null 2>&1
+    fi
+}
+
+hf_get_username() {
+    hf_auth_whoami 2>/dev/null | awk '
+        NR==1 {
+            if ($1 == "name:" && NF >= 2) {
+                print $2
+            } else if (NF >= 1) {
+                print $1
+            }
+            exit
+        }'
+}
+
+hf_download() {
+    if [ "${HF_CLI}" = "hf" ]; then
+        hf download "$@"
+    else
+        huggingface-cli download "$@"
+    fi
+}
+
+hf_repo_create() {
+    local repo_id="$1"
+    local repo_type="$2"
+    local visibility_flag="${3:-}"
+    if [ "${HF_CLI}" = "hf" ]; then
+        if [ -n "${visibility_flag}" ]; then
+            hf repo create "${repo_id}" --repo-type "${repo_type}" "${visibility_flag}"
+        else
+            hf repo create "${repo_id}" --repo-type "${repo_type}"
+        fi
+    else
+        if [ -n "${visibility_flag}" ]; then
+            huggingface-cli repo create "${repo_id}" --type "${repo_type}" "${visibility_flag}"
+        else
+            huggingface-cli repo create "${repo_id}" --type "${repo_type}"
+        fi
+    fi
+}
+
+hf_upload() {
+    if [ "${HF_CLI}" = "hf" ]; then
+        hf upload "$@"
+    else
+        huggingface-cli upload "$@"
+    fi
+}
 
 # Training hyperparameters (fallbacks if train-config.yaml is absent)
 NUM_STEPS="${NUM_STEPS:-300}"
@@ -90,7 +186,7 @@ TEACHER_PORT="${TEACHER_PORT:-13141}"
 TEACHER_MEM_FRACTION="${TEACHER_MEM_FRACTION:-0.6}"
 SGLANG_MEM_FRACTION_STATIC="${SGLANG_MEM_FRACTION_STATIC:-0.4}"
 MAX_TEACHER_WAIT_SEC="${MAX_TEACHER_WAIT_SEC:-300}"
-ENABLE_EVAL="${ENABLE_EVAL:-0}"
+ENABLE_EVAL="${ENABLE_EVAL:-1}"
 WANDB_PROJECT="${WANDB_PROJECT:-slime-dev}"
 WANDB_GROUP="${WANDB_GROUP:-qwen3-32B-to-8B-opd}"
 
@@ -111,12 +207,6 @@ if [ ! -d "${MEGATRON_PATH}" ]; then
     echo "Megatron-LM path not found: ${MEGATRON_PATH}"
     exit 1
 fi
-if [ ! -d "${POOL_DIR}/Qwen3-8B_torch_dist" ]; then
-    echo "Missing student Megatron checkpoint: ${POOL_DIR}/Qwen3-8B_torch_dist"
-    echo "Run prep first:"
-    echo "  bash examples/on_policy_distillation/sfcompute/prep-qwen3-8B-opd.sh"
-    exit 1
-fi
 
 TEACHER_PID=""
 CHECKPOINT_SHIPPER_PID=""
@@ -129,9 +219,9 @@ resolve_hf_checkpoint_repo_id() {
     fi
 
     local hf_user=""
-    hf_user="$(huggingface-cli whoami 2>/dev/null | awk -F': ' '/^name:/{print $2; exit}')"
+    hf_user="$(hf_get_username)"
     if [ -z "${hf_user}" ]; then
-        echo "Failed to infer Hugging Face username. Run 'huggingface-cli login' or set CHECKPOINT_HF_REPO_ID."
+        echo "Failed to infer Hugging Face username. Set HF_TOKEN in .env, run 'hf auth login', or set CHECKPOINT_HF_REPO_ID."
         return 1
     fi
 
@@ -154,18 +244,29 @@ ship_checkpoint_to_hf() {
         else
             visibility_flag="--public"
         fi
-        huggingface-cli repo create "${CHECKPOINT_HF_REPO_ID}" --type "${CHECKPOINT_HF_REPO_TYPE}" "${visibility_flag}" >/dev/null 2>&1 || true
+        local create_out=""
+        if create_out="$(hf_repo_create "${CHECKPOINT_HF_REPO_ID}" "${CHECKPOINT_HF_REPO_TYPE}" "${visibility_flag}" 2>&1)"; then
+            echo "Created HF repo: ${CHECKPOINT_HF_REPO_ID}"
+        else
+            if echo "${create_out}" | grep -qi "already"; then
+                echo "HF repo already exists: ${CHECKPOINT_HF_REPO_ID}"
+            else
+                echo "ERROR: hf repo create failed for ${CHECKPOINT_HF_REPO_ID}:"
+                echo "${create_out}"
+                return 1
+            fi
+        fi
         HF_REPO_CREATED=1
     fi
 
-    huggingface-cli upload \
+    hf_upload \
         "${CHECKPOINT_HF_REPO_ID}" \
         "${iter_dir}" \
         "${remote_iter_dir}" \
         --repo-type "${CHECKPOINT_HF_REPO_TYPE}"
 
     if [ "${CHECKPOINT_HF_UPLOAD_TRACKER}" = "1" ] && [ -f "${CKPT_SAVE_DIR}/latest_checkpointed_iteration.txt" ]; then
-        huggingface-cli upload \
+        hf_upload \
             "${CHECKPOINT_HF_REPO_ID}" \
             "${CKPT_SAVE_DIR}/latest_checkpointed_iteration.txt" \
             "latest_checkpointed_iteration.txt" \
@@ -220,9 +321,66 @@ start_checkpoint_shipper() {
             fi
             sleep "${CHECKPOINT_SHIP_POLL_SEC}"
         done
-    ) >> "${CHECKPOINT_SHIP_LOG}" 2>&1 &
+    ) 2>&1 | tee -a "${CHECKPOINT_SHIP_LOG}" &
     CHECKPOINT_SHIPPER_PID=$!
     echo "Checkpoint shipper pid=${CHECKPOINT_SHIPPER_PID}, log=${CHECKPOINT_SHIP_LOG}"
+}
+
+preflight_hf_checkpoint_shipping() {
+    echo "=== HF checkpoint shipping preflight ==="
+
+    echo "1. Checking HF auth..."
+    local whoami=""
+    if ! whoami="$(hf_auth_whoami 2>&1)"; then
+        echo "FAIL: HF auth failed. Output:"
+        echo "${whoami}"
+        return 1
+    fi
+    echo "   OK: authenticated as $(hf_get_username)"
+
+    echo "2. Resolving repo ID..."
+    if ! resolve_hf_checkpoint_repo_id; then
+        echo "FAIL: could not resolve HF repo ID."
+        return 1
+    fi
+    echo "   OK: repo = ${CHECKPOINT_HF_REPO_ID}"
+
+    echo "3. Creating repo (if needed)..."
+    local visibility_flag=""
+    if [ "${CHECKPOINT_HF_PRIVATE}" = "1" ]; then
+        visibility_flag="--private"
+    else
+        visibility_flag="--public"
+    fi
+    local create_out=""
+    if create_out="$(hf_repo_create "${CHECKPOINT_HF_REPO_ID}" "${CHECKPOINT_HF_REPO_TYPE}" "${visibility_flag}" 2>&1)"; then
+        echo "   OK: created repo ${CHECKPOINT_HF_REPO_ID}"
+    else
+        if echo "${create_out}" | grep -qi "already"; then
+            echo "   OK: repo already exists"
+        else
+            echo "FAIL: hf repo create error:"
+            echo "${create_out}"
+            return 1
+        fi
+    fi
+
+    echo "4. Test upload..."
+    local test_file=""
+    test_file="$(mktemp /tmp/slime_preflight_XXXXXX.txt)"
+    echo "preflight-test $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${test_file}"
+    local upload_out=""
+    if upload_out="$(hf_upload "${CHECKPOINT_HF_REPO_ID}" "${test_file}" ".preflight_test.txt" --repo-type "${CHECKPOINT_HF_REPO_TYPE}" 2>&1)"; then
+        echo "   OK: test file uploaded successfully"
+    else
+        echo "FAIL: hf upload error:"
+        echo "${upload_out}"
+        rm -f "${test_file}"
+        return 1
+    fi
+    rm -f "${test_file}"
+
+    echo "=== Preflight PASSED: checkpoint shipping to ${CHECKPOINT_HF_REPO_ID} is working ==="
 }
 
 cleanup() {
@@ -237,21 +395,68 @@ cleanup() {
 }
 trap 'cleanup; exit 0' TERM INT USR1
 
-if [ ! -d "${POOL_DIR}/Qwen3-32B" ]; then
-    echo "Downloading Qwen3-32B (teacher)..."
-    huggingface-cli download Qwen/Qwen3-32B --local-dir "${POOL_DIR}/Qwen3-32B"
-fi
-if [ ! -d "${POOL_DIR}/Qwen3-8B" ]; then
-    echo "Downloading Qwen3-8B (student)..."
-    huggingface-cli download Qwen/Qwen3-8B --local-dir "${POOL_DIR}/Qwen3-8B"
-fi
-
 if [ -f "${REPO_DIR}/.env" ]; then
     set -a
     # shellcheck disable=SC1090
     source "${REPO_DIR}/.env"
     set +a
 fi
+
+install_hf_cli_if_missing
+HF_TOKEN="${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-${HUGGINGFACE_HUB_TOKEN:-}}}"
+if [ -n "${HF_TOKEN}" ]; then
+    export HF_TOKEN
+fi
+
+if ! hf_auth_whoami >/dev/null 2>&1; then
+    if [ -n "${HF_TOKEN}" ]; then
+        xtrace_was_on=0
+        if [[ "$-" == *x* ]]; then
+            xtrace_was_on=1
+            set +x
+        fi
+        hf_auth_login_token "${HF_TOKEN}" || true
+        if [ "${xtrace_was_on}" -eq 1 ]; then
+            set -x
+        fi
+    fi
+fi
+
+if ! hf_auth_whoami >/dev/null 2>&1; then
+    echo "Hugging Face auth failed. Set HF_TOKEN in ${REPO_DIR}/.env or run 'hf auth login'."
+    exit 1
+fi
+
+# --preflight: test HF checkpoint shipping and exit (no training)
+if [ "${1:-}" = "--preflight" ]; then
+    preflight_hf_checkpoint_shipping
+    exit $?
+fi
+
+AUTO_PREP="${AUTO_PREP:-1}"
+if [ "${AUTO_PREP}" = "1" ]; then
+    echo "Ensuring prep artifacts are ready..."
+    CONFIG_FILE="${CONFIG_FILE}" \
+    ROOT_DIR="${ROOT_DIR}" \
+    POOL_DIR="${POOL_DIR}" \
+    MEGATRON_PATH="${MEGATRON_PATH}" \
+    REPO_DIR="${REPO_DIR}" \
+        bash "${SCRIPT_DIR}/prep-qwen3-8B-opd.sh"
+elif [ ! -d "${POOL_DIR}/Qwen3-8B_torch_dist" ]; then
+    echo "Missing student Megatron checkpoint: ${POOL_DIR}/Qwen3-8B_torch_dist"
+    echo "Set AUTO_PREP=1 (default) or run prep manually."
+    exit 1
+fi
+
+if [ ! -d "${POOL_DIR}/Qwen3-32B" ]; then
+    echo "Downloading Qwen3-32B (teacher)..."
+    hf_download Qwen/Qwen3-32B --local-dir "${POOL_DIR}/Qwen3-32B"
+fi
+if [ ! -d "${POOL_DIR}/Qwen3-8B" ]; then
+    echo "Downloading Qwen3-8B (student)..."
+    hf_download Qwen/Qwen3-8B --local-dir "${POOL_DIR}/Qwen3-8B"
+fi
+
 WANDB_KEY="${WANDB_API_KEY:-${WANDB_KEY:-}}"
 if [ -z "${WANDB_KEY}" ]; then
     echo "WANDB is enabled but no API key found in environment (.env)."
@@ -271,11 +476,7 @@ if [ "${CHECKPOINT_SHIP_ENABLED}" = "1" ]; then
         exit 1
     fi
     if [ "${CHECKPOINT_SHIP_BACKEND}" = "huggingface" ]; then
-        if ! command -v huggingface-cli >/dev/null 2>&1; then
-            echo "huggingface-cli not found but CHECKPOINT_SHIP_BACKEND=huggingface."
-            exit 1
-        fi
-        resolve_hf_checkpoint_repo_id || exit 1
+        preflight_hf_checkpoint_shipping || exit 1
     fi
     mkdir -p "${CKPT_SAVE_DIR}"
     start_checkpoint_shipper
@@ -359,12 +560,25 @@ RM_ARGS=(
 
 EVAL_ARGS=()
 if [ "${ENABLE_EVAL}" = "1" ]; then
+   # Generate eval config YAML that uses dapo accuracy grading (not the teacher RM)
+   EVAL_CONFIG_FILE="/tmp/slime_eval_config.yaml"
+   cat > "${EVAL_CONFIG_FILE}" <<EVALEOF
+defaults:
+  n_samples_per_eval_prompt: ${N_SAMPLES_PER_EVAL_PROMPT}
+  temperature: ${EVAL_TEMPERATURE}
+  max_response_len: ${EVAL_MAX_RESPONSE_LEN}
+
+datasets:
+  eval:
+    path: ${EVAL_DATA}
+    input_key: prompt
+    label_key: reward_model
+    rm_type: dapo
+EVALEOF
    EVAL_ARGS=(
       --eval-interval "${EVAL_INTERVAL}"
-      --eval-prompt-data eval "${EVAL_DATA}"
-      --n-samples-per-eval-prompt "${N_SAMPLES_PER_EVAL_PROMPT}"
-      --eval-max-response-len "${EVAL_MAX_RESPONSE_LEN}"
-      --eval-temperature "${EVAL_TEMPERATURE}"
+      --eval-config "${EVAL_CONFIG_FILE}"
+      --eval-reward-key acc
    )
 fi
 

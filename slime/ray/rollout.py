@@ -684,12 +684,22 @@ def _log_eval_rollout_data(rollout_id, args, data, extra_metrics: dict[str, Any]
         if custom_log_func(rollout_id, args, data, extra_metrics):
             return
 
+    # Use eval_reward_key for metric computation so get_reward_value works with eval reward format
+    eval_reward_key = getattr(args, "eval_reward_key", None) or args.reward_key
+    if eval_reward_key != args.reward_key:
+        import copy
+
+        eval_args = copy.copy(args)
+        eval_args.reward_key = eval_reward_key
+    else:
+        eval_args = args
+
     log_dict = extra_metrics or {}
     for key in data.keys():
         rewards = data[key]["rewards"]
         log_dict[f"eval/{key}"] = sum(rewards) / len(rewards)
         if (samples := data[key].get("samples")) is not None:
-            log_dict |= dict_add_prefix(compute_metrics_from_samples(args, samples), f"eval/{key}/")
+            log_dict |= dict_add_prefix(compute_metrics_from_samples(eval_args, samples), f"eval/{key}/")
         if "truncated" in data[key]:
             truncated = data[key]["truncated"]
             log_dict[f"eval/{key}-truncated_ratio"] = sum(truncated) / len(truncated)

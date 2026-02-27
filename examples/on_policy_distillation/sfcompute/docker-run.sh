@@ -11,6 +11,7 @@ usage() {
 Usage:
   bash examples/on_policy_distillation/sfcompute/docker-run.sh prep
   bash examples/on_policy_distillation/sfcompute/docker-run.sh train
+  bash examples/on_policy_distillation/sfcompute/docker-run.sh preflight   # test HF checkpoint upload
 
 Optional environment overrides:
   IMAGE    Docker image tag (default: slimerl/slime:latest)
@@ -35,6 +36,16 @@ fi
 mkdir -p "${POOL_DIR}"
 mkdir -p "${HF_CACHE_DIR}"
 
+if [ -f "${REPO_DIR}/.env" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "${REPO_DIR}/.env"
+    set +a
+fi
+
+HF_TOKEN="${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-${HUGGINGFACE_HUB_TOKEN:-}}}"
+WANDB_API_KEY="${WANDB_API_KEY:-${WANDB_KEY:-}}"
+
 case "${COMMAND}" in
     prep)
         docker run --rm --gpus all --ipc=host \
@@ -42,6 +53,9 @@ case "${COMMAND}" in
             -v "${REPO_DIR}:/root/slime" \
             -v "${POOL_DIR}:/root/pool" \
             -v "${HF_CACHE_DIR}:/root/.cache/huggingface" \
+            -e HF_TOKEN="${HF_TOKEN}" \
+            -e WANDB_API_KEY="${WANDB_API_KEY}" \
+            -e CHECKPOINT_HF_REPO_ID="${CHECKPOINT_HF_REPO_ID:-}" \
             -w /root/slime \
             "${IMAGE}" \
             bash examples/on_policy_distillation/sfcompute/prep-qwen3-8B-opd.sh "$@"
@@ -52,9 +66,25 @@ case "${COMMAND}" in
             -v "${REPO_DIR}:/root/slime" \
             -v "${POOL_DIR}:/root/pool" \
             -v "${HF_CACHE_DIR}:/root/.cache/huggingface" \
+            -e HF_TOKEN="${HF_TOKEN}" \
+            -e WANDB_API_KEY="${WANDB_API_KEY}" \
+            -e CHECKPOINT_HF_REPO_ID="${CHECKPOINT_HF_REPO_ID:-}" \
             -w /root/slime \
             "${IMAGE}" \
             bash examples/on_policy_distillation/sfcompute/run-qwen3-8B-opd.sh "$@"
+        ;;
+    preflight)
+        docker run --rm --gpus all --ipc=host \
+            --ulimit memlock=-1 --ulimit stack=67108864 \
+            -v "${REPO_DIR}:/root/slime" \
+            -v "${POOL_DIR}:/root/pool" \
+            -v "${HF_CACHE_DIR}:/root/.cache/huggingface" \
+            -e HF_TOKEN="${HF_TOKEN}" \
+            -e WANDB_API_KEY="${WANDB_API_KEY}" \
+            -e CHECKPOINT_HF_REPO_ID="${CHECKPOINT_HF_REPO_ID:-}" \
+            -w /root/slime \
+            "${IMAGE}" \
+            bash examples/on_policy_distillation/sfcompute/run-qwen3-8B-opd.sh --preflight
         ;;
     *)
         echo "Unknown command: ${COMMAND}"

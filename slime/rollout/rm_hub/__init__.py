@@ -28,12 +28,17 @@ async def remote_rm(args, sample: Sample):
 
 
 async def async_rm(args, sample: Sample, **kwargs):
-    if args.custom_rm_path is not None:
+    metadata = sample.metadata if isinstance(sample.metadata, dict) else {}
+    rm_type = (metadata.get("rm_type") or "").strip()
+
+    # If the sample has an explicit rm_type in its metadata (e.g., from eval dataset config),
+    # use the standard rm_type dispatch instead of the global custom_rm_path.
+    # This allows eval datasets to use a different reward function than training.
+    if not rm_type and args.custom_rm_path is not None:
         rm_function = load_function(args.custom_rm_path)
         return await rm_function(args, sample, **kwargs)
 
-    metadata = sample.metadata if isinstance(sample.metadata, dict) else {}
-    rm_type = (metadata.get("rm_type") or args.rm_type or "").strip()
+    rm_type = rm_type or (args.rm_type or "").strip()
     response = sample.response
     label = sample.label
     if rm_type.startswith("boxed_"):
@@ -47,6 +52,9 @@ async def async_rm(args, sample: Sample, **kwargs):
     elif rm_type == "deepscaler":
         return get_deepscaler_rule_based_reward(response, label)
     elif rm_type == "dapo":
+        # Support DAPO dataset format where label is {"ground_truth": "...", "style": "..."}
+        if isinstance(label, dict):
+            label = label.get("ground_truth", label)
         return compute_score_dapo(response, label)
     elif rm_type == "math":
         return 1 if grade_answer_verl(response, label) else 0

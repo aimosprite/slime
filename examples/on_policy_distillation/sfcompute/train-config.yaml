@@ -59,7 +59,8 @@ checkpoint_hf_upload_tracker: 1
 # Advanced/custom route (takes precedence over backend if set):
 # checkpoint_ship_cmd: aws s3 sync "$CHECKPOINT_ITER_DIR" "s3://your-bucket/qwen3-8b-opd/iter_${CHECKPOINT_STEP}/" --only-show-errors
 
-# ── Eval (only used when ENABLE_EVAL=1) ───────────────────────────────
+# ── Eval ─────────────────────────────────────────────────────────────
+enable_eval: 1
 eval_interval: 20
 n_samples_per_eval_prompt: 4
 eval_max_response_len: 16384
