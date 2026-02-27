@@ -1,18 +1,25 @@
-# Training hyperparameters for Qwen3-32B → Qwen3-8B OPD on 8x H100.
+# Training hyperparameters for OPD on 8x H100.
 # Edit this file to tune a run. Env vars always take precedence over values here.
 # Paths stay in config-8xh100.env; GPU layout has moved here.
 
+# ── Models ────────────────────────────────────────────────────────────
+# HuggingFace model IDs for teacher and student.
+teacher_model: Qwen/Qwen3-32B
+student_model: Qwen/Qwen3-8B
+# Model args script for the student (under scripts/models/).
+student_model_args: qwen3-8B.sh
+
 # ── GPU allocation ────────────────────────────────────────────────────
-# Teacher server (Qwen3-32B sglang). TEACHER_TP is auto-derived from GPU count.
+# Teacher server (sglang). TEACHER_TP is auto-derived from GPU count.
 teacher_visible_gpus: 6,7
 # Ray cluster: covers both student rollout and student training GPUs.
 ray_visible_gpus: 0,1,2,3,4,5
 # Student training (gradient updates). Must satisfy: actor_num_gpus_per_node + rollout_num_gpus <= len(ray_visible_gpus).
-actor_num_gpus_per_node: 4
+actor_num_gpus_per_node: 2
 # Student rollout engine (sglang within Ray).
-rollout_num_gpus: 1
+rollout_num_gpus: 4
 # Tensor parallel size for student training.
-tensor_model_parallel_size: 4
+tensor_model_parallel_size: 2
 # Memory fractions for the two sglang servers.
 teacher_mem_fraction: 0.6
 sglang_mem_fraction_static: 0.4
@@ -42,26 +49,26 @@ kl_loss_coef: 0.00
 entropy_coef: 0.00
 
 # ── Checkpointing ─────────────────────────────────────────────────────
-save_interval: 15
+save_interval: 10
 # Optional checkpoint shipping loop (for ephemeral nodes).
 # Default backend is Hugging Face Hub and auto-creates/uploads every 10 steps.
 checkpoint_ship_enabled: 1
-checkpoint_ship_every: 15
+checkpoint_ship_every: 10
 checkpoint_ship_poll_sec: 15
 checkpoint_ship_backend: huggingface
 # Optional override (recommended for team/shared runs):
-# checkpoint_hf_repo_id: your-org/qwen3-8b-opd-checkpoints
-checkpoint_hf_repo_basename: qwen3-8b-opd-checkpoints
+# checkpoint_hf_repo_id: your-org/my-opd-checkpoints
+# Basename is auto-derived from teacher/student models if not set.
 checkpoint_hf_repo_type: model
 checkpoint_hf_private: 1
 checkpoint_hf_create_repo: 1
 checkpoint_hf_upload_tracker: 1
 # Advanced/custom route (takes precedence over backend if set):
-# checkpoint_ship_cmd: aws s3 sync "$CHECKPOINT_ITER_DIR" "s3://your-bucket/qwen3-8b-opd/iter_${CHECKPOINT_STEP}/" --only-show-errors
+# checkpoint_ship_cmd: aws s3 sync "$CHECKPOINT_ITER_DIR" "s3://your-bucket/opd-checkpoints/iter_${CHECKPOINT_STEP}/" --only-show-errors
 
 # ── Eval ─────────────────────────────────────────────────────────────
 enable_eval: 1
-eval_interval: 20
+eval_interval: 10
 n_samples_per_eval_prompt: 4
 eval_max_response_len: 16384
 eval_temperature: 1

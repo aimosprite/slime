@@ -124,6 +124,15 @@ hf_upload() {
     fi
 }
 
+# Model config (fallbacks if train-config.yaml is absent)
+TEACHER_MODEL="${TEACHER_MODEL:-Qwen/Qwen3-32B}"
+STUDENT_MODEL="${STUDENT_MODEL:-Qwen/Qwen3-8B}"
+STUDENT_MODEL_ARGS="${STUDENT_MODEL_ARGS:-qwen3-8B.sh}"
+
+# Derive short names from HF model IDs (e.g. "Qwen/Qwen3-32B" -> "Qwen3-32B")
+TEACHER_SHORT="${TEACHER_MODEL##*/}"
+STUDENT_SHORT="${STUDENT_MODEL##*/}"
+
 # Training hyperparameters (fallbacks if train-config.yaml is absent)
 NUM_STEPS="${NUM_STEPS:-300}"
 ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-16}"
@@ -151,7 +160,8 @@ CHECKPOINT_SHIP_CMD="${CHECKPOINT_SHIP_CMD:-}"
 CHECKPOINT_SHIP_BACKEND="${CHECKPOINT_SHIP_BACKEND:-huggingface}"
 CHECKPOINT_SHIP_LOG="${CHECKPOINT_SHIP_LOG:-/tmp/slime_checkpoint_shipper.log}"
 CHECKPOINT_HF_REPO_ID="${CHECKPOINT_HF_REPO_ID:-}"
-CHECKPOINT_HF_REPO_BASENAME="${CHECKPOINT_HF_REPO_BASENAME:-qwen3-8b-opd-checkpoints}"
+# Auto-derive basename from model names if not explicitly set
+CHECKPOINT_HF_REPO_BASENAME="${CHECKPOINT_HF_REPO_BASENAME:-$(echo "${STUDENT_SHORT}-from-${TEACHER_SHORT}-opd" | tr '[:upper:]' '[:lower:]')}"
 CHECKPOINT_HF_REPO_TYPE="${CHECKPOINT_HF_REPO_TYPE:-model}"
 CHECKPOINT_HF_PRIVATE="${CHECKPOINT_HF_PRIVATE:-1}"
 CHECKPOINT_HF_CREATE_REPO="${CHECKPOINT_HF_CREATE_REPO:-1}"
@@ -176,8 +186,20 @@ NUM_ROLLOUT=$(( NUM_STEPS * GLOBAL_BATCH_SIZE / NUM_ROLLOUT_DENOM ))
 ROOT_DIR="${ROOT_DIR:-$HOME}"
 POOL_DIR="${POOL_DIR:-${ROOT_DIR}/pool}"
 
+# Resolve model paths: local absolute paths are used directly, HF IDs resolve to POOL_DIR.
+if [[ "${TEACHER_MODEL}" == /* ]]; then
+    TEACHER_PATH="${TEACHER_MODEL}"
+else
+    TEACHER_PATH="${POOL_DIR}/${TEACHER_SHORT}"
+fi
+if [[ "${STUDENT_MODEL}" == /* ]]; then
+    STUDENT_PATH="${STUDENT_MODEL}"
+else
+    STUDENT_PATH="${POOL_DIR}/${STUDENT_SHORT}"
+fi
+
 # Tee all output to a persistent log on the mounted volume
-RUN_LOG="${RUN_LOG:-${POOL_DIR}/run-qwen3-8B-opd.log}"
+RUN_LOG="${RUN_LOG:-${POOL_DIR}/run-opd.log}"
 mkdir -p "$(dirname "${RUN_LOG}")"
 exec > >(tee -a "${RUN_LOG}") 2>&1
 echo "=== Run started at $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
@@ -195,7 +217,7 @@ SGLANG_MEM_FRACTION_STATIC="${SGLANG_MEM_FRACTION_STATIC:-0.4}"
 MAX_TEACHER_WAIT_SEC="${MAX_TEACHER_WAIT_SEC:-300}"
 ENABLE_EVAL="${ENABLE_EVAL:-1}"
 WANDB_PROJECT="${WANDB_PROJECT:-slime-dev}"
-WANDB_GROUP="${WANDB_GROUP:-qwen3-32B-to-8B-opd}"
+WANDB_GROUP="${WANDB_GROUP:-${TEACHER_SHORT}-to-${STUDENT_SHORT}-opd}"
 
 NUM_GPUS="$(awk -F',' '{print NF}' <<< "${RAY_VISIBLE_GPUS}")"
 if [ $((ACTOR_NUM_GPUS_PER_NODE + ROLLOUT_NUM_GPUS)) -gt "${NUM_GPUS}" ]; then
@@ -217,7 +239,8 @@ fi
 
 TEACHER_PID=""
 CHECKPOINT_SHIPPER_PID=""
-CKPT_SAVE_DIR="${POOL_DIR}/Qwen3-8B_slime"
+CKPT_SAVE_DIR="${POOL_DIR}/${STUDENT_SHORT}_slime"
+STUDENT_TORCH_DIST="${POOL_DIR}/${STUDENT_SHORT}_torch_dist"
 HF_REPO_CREATED=0
 
 resolve_hf_checkpoint_repo_id() {
@@ -444,24 +467,33 @@ AUTO_PREP="${AUTO_PREP:-1}"
 if [ "${AUTO_PREP}" = "1" ]; then
     echo "Ensuring prep artifacts are ready..."
     CONFIG_FILE="${CONFIG_FILE}" \
+    TRAIN_CONFIG="${TRAIN_CONFIG}" \
     ROOT_DIR="${ROOT_DIR}" \
     POOL_DIR="${POOL_DIR}" \
     MEGATRON_PATH="${MEGATRON_PATH}" \
     REPO_DIR="${REPO_DIR}" \
-        bash "${SCRIPT_DIR}/prep-qwen3-8B-opd.sh"
-elif [ ! -d "${POOL_DIR}/Qwen3-8B_torch_dist" ]; then
-    echo "Missing student Megatron checkpoint: ${POOL_DIR}/Qwen3-8B_torch_dist"
+        bash "${SCRIPT_DIR}/prep-opd.sh"
+elif [ ! -d "${STUDENT_TORCH_DIST}" ]; then
+    echo "Missing student Megatron checkpoint: ${STUDENT_TORCH_DIST}"
     echo "Set AUTO_PREP=1 (default) or run prep manually."
     exit 1
 fi
 
-if [ ! -d "${POOL_DIR}/Qwen3-32B" ]; then
-    echo "Downloading Qwen3-32B (teacher)..."
-    hf_download Qwen/Qwen3-32B --local-dir "${POOL_DIR}/Qwen3-32B"
+if [ ! -d "${TEACHER_PATH}" ]; then
+    if [[ "${TEACHER_MODEL}" == /* ]]; then
+        echo "Teacher model path not found: ${TEACHER_PATH}"
+        exit 1
+    fi
+    echo "Downloading ${TEACHER_SHORT} (teacher)..."
+    hf_download "${TEACHER_MODEL}" --local-dir "${TEACHER_PATH}"
 fi
-if [ ! -d "${POOL_DIR}/Qwen3-8B" ]; then
-    echo "Downloading Qwen3-8B (student)..."
-    hf_download Qwen/Qwen3-8B --local-dir "${POOL_DIR}/Qwen3-8B"
+if [ ! -d "${STUDENT_PATH}" ]; then
+    if [[ "${STUDENT_MODEL}" == /* ]]; then
+        echo "Student model path not found: ${STUDENT_PATH}"
+        exit 1
+    fi
+    echo "Downloading ${STUDENT_SHORT} (student)..."
+    hf_download "${STUDENT_MODEL}" --local-dir "${STUDENT_PATH}"
 fi
 
 WANDB_KEY="${WANDB_API_KEY:-${WANDB_KEY:-}}"
@@ -492,7 +524,7 @@ fi
 TEACHER_IP="127.0.0.1"
 LOG_FILE="/tmp/sglang_$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 6).log"
 CUDA_VISIBLE_DEVICES="${TEACHER_VISIBLE_GPUS}" python3 -m sglang.launch_server \
-    --model-path "${POOL_DIR}/Qwen3-32B" \
+    --model-path "${TEACHER_PATH}" \
     --host 0.0.0.0 \
     --port "${TEACHER_PORT}" \
     --tp "${TEACHER_TP}" \
@@ -516,7 +548,7 @@ curl "http://${TEACHER_IP}:${TEACHER_PORT}/get_model_info"
 sleep 10
 
 export PYTHONUNBUFFERED=1
-source "${REPO_DIR}/scripts/models/qwen3-8B.sh"
+source "${REPO_DIR}/scripts/models/${STUDENT_MODEL_ARGS}"
 
 DATA_DIR="${POOL_DIR}/dapo-math-17k"
 TRAIN_DATA="${DATA_DIR}/dapo-math-17k-train.jsonl"
@@ -538,8 +570,8 @@ if [ ! -f "${EVAL_DATA}" ]; then
 fi
 
 CKPT_ARGS=(
-   --hf-checkpoint "${POOL_DIR}/Qwen3-8B"
-   --ref-load "${POOL_DIR}/Qwen3-8B_torch_dist"
+   --hf-checkpoint "${STUDENT_PATH}"
+   --ref-load "${STUDENT_TORCH_DIST}"
    --load "${CKPT_SAVE_DIR}/"
    --save "${CKPT_SAVE_DIR}/"
    --save-interval "${SAVE_INTERVAL}"

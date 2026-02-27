@@ -73,7 +73,7 @@ create_dotenv() {
     umask 077
     read -rsp "WANDB_API_KEY: " WANDB_API_KEY; echo
     read -rsp "HF token (hf_...): " HF_TOKEN; echo
-    read -rp  "CHECKPOINT_HF_REPO_ID (optional, e.g. my-org/qwen3-8b-opd-checkpoints): " CHECKPOINT_HF_REPO_ID
+    read -rp  "CHECKPOINT_HF_REPO_ID (optional, auto-derived from models if empty): " CHECKPOINT_HF_REPO_ID
 
     cat > "${env_file}" <<EOF
 WANDB_API_KEY=${WANDB_API_KEY}

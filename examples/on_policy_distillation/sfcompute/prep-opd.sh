@@ -3,8 +3,23 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR_DEFAULT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
-CONFIG_FILE="${CONFIG_FILE:-${SCRIPT_DIR}/config-8xh100.env}"
 
+# Load train-config.yaml first (same logic as run-opd.sh)
+TRAIN_CONFIG="${TRAIN_CONFIG:-${SCRIPT_DIR}/train-config.yaml}"
+if [ -f "${TRAIN_CONFIG}" ]; then
+    eval "$(python3 - "${TRAIN_CONFIG}" <<'PYEOF'
+import sys, re, os
+for line in open(sys.argv[1]):
+    line = line.split('#')[0].strip()
+    m = re.match(r'^([a-z_]+):\s*(\S.*)', line)
+    if m:
+        k, v = m.group(1).upper(), m.group(2).strip()
+        if k not in os.environ:
+            print(f"export {k}='{v}'")
+PYEOF)"
+fi
+
+CONFIG_FILE="${CONFIG_FILE:-${SCRIPT_DIR}/config-8xh100.env}"
 if [ -f "${CONFIG_FILE}" ]; then
     set -a
     # shellcheck disable=SC1090
@@ -17,6 +32,25 @@ POOL_DIR="${POOL_DIR:-${ROOT_DIR}/pool}"
 MEGATRON_PATH="${MEGATRON_PATH:-${ROOT_DIR}/Megatron-LM}"
 REPO_DIR="${REPO_DIR:-${REPO_DIR_DEFAULT}}"
 HF_CLI=""
+
+# Model config
+TEACHER_MODEL="${TEACHER_MODEL:-Qwen/Qwen3-32B}"
+STUDENT_MODEL="${STUDENT_MODEL:-Qwen/Qwen3-8B}"
+STUDENT_MODEL_ARGS="${STUDENT_MODEL_ARGS:-qwen3-8B.sh}"
+TEACHER_SHORT="${TEACHER_MODEL##*/}"
+STUDENT_SHORT="${STUDENT_MODEL##*/}"
+
+# Resolve model paths: local absolute paths are used directly, HF IDs resolve to POOL_DIR.
+if [[ "${TEACHER_MODEL}" == /* ]]; then
+    TEACHER_PATH="${TEACHER_MODEL}"
+else
+    TEACHER_PATH="${POOL_DIR}/${TEACHER_SHORT}"
+fi
+if [[ "${STUDENT_MODEL}" == /* ]]; then
+    STUDENT_PATH="${STUDENT_MODEL}"
+else
+    STUDENT_PATH="${POOL_DIR}/${STUDENT_SHORT}"
+fi
 
 require_cmd() {
     if ! command -v "$1" >/dev/null 2>&1; then
@@ -107,8 +141,8 @@ if [ ! -f "${REPO_DIR}/tools/convert_hf_to_torch_dist.py" ]; then
     echo "Missing conversion script: ${REPO_DIR}/tools/convert_hf_to_torch_dist.py"
     exit 1
 fi
-if [ ! -f "${REPO_DIR}/scripts/models/qwen3-8B.sh" ]; then
-    echo "Missing model args script: ${REPO_DIR}/scripts/models/qwen3-8B.sh"
+if [ ! -f "${REPO_DIR}/scripts/models/${STUDENT_MODEL_ARGS}" ]; then
+    echo "Missing model args script: ${REPO_DIR}/scripts/models/${STUDENT_MODEL_ARGS}"
     exit 1
 fi
 if [ ! -d "${MEGATRON_PATH}" ]; then
@@ -202,34 +236,43 @@ else
     echo "Dataset JSONL already exists, skipping conversion."
 fi
 
-if [ ! -d "${POOL_DIR}/Qwen3-32B" ]; then
-    echo "Downloading Qwen3-32B (teacher)..."
-    hf_download Qwen/Qwen3-32B --local-dir "${POOL_DIR}/Qwen3-32B"
+if [ ! -d "${TEACHER_PATH}" ]; then
+    if [[ "${TEACHER_MODEL}" == /* ]]; then
+        echo "Teacher model path not found: ${TEACHER_PATH}"
+        exit 1
+    fi
+    echo "Downloading ${TEACHER_SHORT} (teacher)..."
+    hf_download "${TEACHER_MODEL}" --local-dir "${TEACHER_PATH}"
 else
-    echo "Qwen3-32B already exists, skipping download."
+    echo "Teacher model (${TEACHER_PATH}) already exists, skipping download."
 fi
 
-if [ ! -d "${POOL_DIR}/Qwen3-8B" ]; then
-    echo "Downloading Qwen3-8B (student)..."
-    hf_download Qwen/Qwen3-8B --local-dir "${POOL_DIR}/Qwen3-8B"
+if [ ! -d "${STUDENT_PATH}" ]; then
+    if [[ "${STUDENT_MODEL}" == /* ]]; then
+        echo "Student model path not found: ${STUDENT_PATH}"
+        exit 1
+    fi
+    echo "Downloading ${STUDENT_SHORT} (student)..."
+    hf_download "${STUDENT_MODEL}" --local-dir "${STUDENT_PATH}"
 else
-    echo "Qwen3-8B already exists, skipping download."
+    echo "Student model (${STUDENT_PATH}) already exists, skipping download."
 fi
 
-if [ ! -d "${POOL_DIR}/Qwen3-8B_torch_dist" ]; then
-    echo "Converting Qwen3-8B HF checkpoint to Megatron torch_dist..."
+STUDENT_TORCH_DIST="${POOL_DIR}/${STUDENT_SHORT}_torch_dist"
+if [ ! -d "${STUDENT_TORCH_DIST}" ]; then
+    echo "Converting ${STUDENT_SHORT} HF checkpoint to Megatron torch_dist..."
     # shellcheck disable=SC1091
-    source "${REPO_DIR}/scripts/models/qwen3-8B.sh"
+    source "${REPO_DIR}/scripts/models/${STUDENT_MODEL_ARGS}"
     PYTHONPATH="${MEGATRON_PATH}" python3 "${REPO_DIR}/tools/convert_hf_to_torch_dist.py" \
         "${MODEL_ARGS[@]}" \
-        --hf-checkpoint "${POOL_DIR}/Qwen3-8B" \
-        --save "${POOL_DIR}/Qwen3-8B_torch_dist"
+        --hf-checkpoint "${STUDENT_PATH}" \
+        --save "${STUDENT_TORCH_DIST}"
 else
-    echo "Qwen3-8B_torch_dist already exists, skipping conversion."
+    echo "${STUDENT_SHORT}_torch_dist already exists, skipping conversion."
 fi
 
 echo ""
 echo "========================================="
 echo "Prep complete. Ready to run training:"
-echo "  bash examples/on_policy_distillation/sfcompute/run-qwen3-8B-opd.sh"
+echo "  bash examples/on_policy_distillation/sfcompute/run-opd.sh"
 echo "========================================="

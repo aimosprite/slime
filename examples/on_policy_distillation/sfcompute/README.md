@@ -1,6 +1,6 @@
 # sfcompute OPD
 
-Run Qwen3-8B on-policy distillation on a single 8x H100 node via Docker.
+Run on-policy distillation on a single 8x H100 node via Docker. Teacher and student models are configured in `train-config.yaml`.
 
 ## Quickstart
 
@@ -48,19 +48,19 @@ Re-attach later with `tmux attach -t opd`.
 |------|---------|
 | `setup.sh` | One-shot host setup + training launcher |
 | `docker-run.sh` | Docker wrapper for prep/train |
-| `prep-qwen3-8B-opd.sh` | Idempotent prep (dataset/model download + checkpoint conversion) |
-| `run-qwen3-8B-opd.sh` | Launches teacher + Ray OPD training (auto-runs prep if needed) |
+| `prep-opd.sh` | Idempotent prep (dataset/model download + checkpoint conversion) |
+| `run-opd.sh` | Launches teacher + Ray OPD training (auto-runs prep if needed) |
 | `config-8xh100.env` | Configurable paths and GPU layout |
 | `train-config.yaml` | Training hyperparameters (save/eval cadence, optimizer, checkpoint shipping) |
 
 ## Hugging Face auth
 
 - `.env` `HF_TOKEN` is the primary auth source — scripts authenticate automatically.
-- If `CHECKPOINT_HF_REPO_ID` is empty, checkpoint uploads default to `<hf_username>/qwen3-8b-opd-checkpoints`.
+- If `CHECKPOINT_HF_REPO_ID` is empty, checkpoint uploads default to `<hf_username>/<student>-from-<teacher>-opd` (auto-derived from model names in `train-config.yaml`).
 
 ## Checkpoint safety on ephemeral nodes
 
-`run-qwen3-8B-opd.sh` ships checkpoints to Hugging Face Hub every 15 steps by default (configurable in `train-config.yaml`). A preflight check runs automatically at startup to verify auth, repo creation, and uploads before training begins.
+`run-opd.sh` ships checkpoints to Hugging Face Hub every 10 steps by default (configurable in `train-config.yaml`). A preflight check runs automatically at startup to verify auth, repo creation, and uploads before training begins.
 
 To run the preflight manually (without starting training):
 

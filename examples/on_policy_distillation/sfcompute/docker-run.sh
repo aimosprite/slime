@@ -58,7 +58,7 @@ case "${COMMAND}" in
             -e CHECKPOINT_HF_REPO_ID="${CHECKPOINT_HF_REPO_ID:-}" \
             -w /root/slime \
             "${IMAGE}" \
-            bash examples/on_policy_distillation/sfcompute/prep-qwen3-8B-opd.sh "$@"
+            bash examples/on_policy_distillation/sfcompute/prep-opd.sh "$@"
         ;;
     train)
         docker run --rm --gpus all --network host --ipc=host --shm-size=64g \
@@ -71,7 +71,7 @@ case "${COMMAND}" in
             -e CHECKPOINT_HF_REPO_ID="${CHECKPOINT_HF_REPO_ID:-}" \
             -w /root/slime \
             "${IMAGE}" \
-            bash examples/on_policy_distillation/sfcompute/run-qwen3-8B-opd.sh "$@"
+            bash examples/on_policy_distillation/sfcompute/run-opd.sh "$@"
         ;;
     preflight)
         docker run --rm --gpus all --ipc=host \
@@ -84,7 +84,7 @@ case "${COMMAND}" in
             -e CHECKPOINT_HF_REPO_ID="${CHECKPOINT_HF_REPO_ID:-}" \
             -w /root/slime \
             "${IMAGE}" \
-            bash examples/on_policy_distillation/sfcompute/run-qwen3-8B-opd.sh --preflight
+            bash examples/on_policy_distillation/sfcompute/run-opd.sh --preflight
         ;;
     *)
         echo "Unknown command: ${COMMAND}"
