@@ -60,4 +60,20 @@ Re-attach later with `tmux attach -t opd`.
 
 ## Checkpoint safety on ephemeral nodes
 
-`run-qwen3-8B-opd.sh` ships checkpoints to Hugging Face Hub every 10 steps by default (configurable in `train-config.yaml`).
+`run-qwen3-8B-opd.sh` ships checkpoints to Hugging Face Hub every 15 steps by default (configurable in `train-config.yaml`). A preflight check runs automatically at startup to verify auth, repo creation, and uploads before training begins.
+
+To run the preflight manually (without starting training):
+
+```bash
+bash examples/on_policy_distillation/sfcompute/docker-run.sh preflight
+```
+
+This verifies your HF token, creates the checkpoint repo if needed, and uploads a test file. Takes a few seconds and will surface any auth or permissions issues before you commit to a long run.
+
+Note: the preflight requires Docker and a `.env` with your `HF_TOKEN`, so you cannot run it before `setup.sh`. However, the preflight runs automatically at the start of every training run (before any model downloads or GPU work), so if HF auth is broken the script will exit immediately without wasting time. Use the manual preflight command above for subsequent runs or after changing tokens.
+
+## Get a node on SF Compute
+
+1. Run `bash sfacquire.sh` from the aimo repo, answer all the questions (make sure that pass_along_node_to_setup.sh exists)
+2. Do `sf nodes ssh root@...` based on whatever node you have there
+    - If that doesn't work, try [this](https://discord.com/channels/1447431405788463157/1461129003896410282/1476321257203957991)

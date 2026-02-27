@@ -188,7 +188,7 @@ SGLANG_MEM_FRACTION_STATIC="${SGLANG_MEM_FRACTION_STATIC:-0.4}"
 MAX_TEACHER_WAIT_SEC="${MAX_TEACHER_WAIT_SEC:-300}"
 ENABLE_EVAL="${ENABLE_EVAL:-1}"
 WANDB_PROJECT="${WANDB_PROJECT:-slime-dev}"
-WANDB_GROUP="${WANDB_GROUP:-qwen3-32B-to-8B-opd}"
+WANDB_GROUP="${WANDB_GROUP:-qwen3.5-35B-A3B-to-8B-opd}"
 
 NUM_GPUS="$(awk -F',' '{print NF}' <<< "${RAY_VISIBLE_GPUS}")"
 if [ $((ACTOR_NUM_GPUS_PER_NODE + ROLLOUT_NUM_GPUS)) -gt "${NUM_GPUS}" ]; then
@@ -448,9 +448,9 @@ elif [ ! -d "${POOL_DIR}/Qwen3-8B_torch_dist" ]; then
     exit 1
 fi
 
-if [ ! -d "${POOL_DIR}/Qwen3-32B" ]; then
-    echo "Downloading Qwen3-32B (teacher)..."
-    hf_download Qwen/Qwen3-32B --local-dir "${POOL_DIR}/Qwen3-32B"
+if [ ! -d "${POOL_DIR}/Qwen3.5-35B-A3B" ]; then
+    echo "Downloading Qwen3.5-35B-A3B (teacher)..."
+    hf_download Qwen/Qwen3.5-35B-A3B --local-dir "${POOL_DIR}/Qwen3.5-35B-A3B"
 fi
 if [ ! -d "${POOL_DIR}/Qwen3-8B" ]; then
     echo "Downloading Qwen3-8B (student)..."
@@ -485,7 +485,7 @@ fi
 TEACHER_IP="127.0.0.1"
 LOG_FILE="/tmp/sglang_$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 6).log"
 CUDA_VISIBLE_DEVICES="${TEACHER_VISIBLE_GPUS}" python3 -m sglang.launch_server \
-    --model-path "${POOL_DIR}/Qwen3-32B" \
+    --model-path "${POOL_DIR}/Qwen3.5-35B-A3B" \
     --host 0.0.0.0 \
     --port "${TEACHER_PORT}" \
     --tp "${TEACHER_TP}" \
