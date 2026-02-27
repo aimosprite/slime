@@ -1,9 +1,9 @@
-# Training hyperparameters for Qwen3.5-35B-A3B → Qwen3-8B OPD on 8x H100.
+# Training hyperparameters for Qwen3-32B → Qwen3-8B OPD on 8x H100.
 # Edit this file to tune a run. Env vars always take precedence over values here.
 # Paths stay in config-8xh100.env; GPU layout has moved here.
 
 # ── GPU allocation ────────────────────────────────────────────────────
-# Teacher server (Qwen3.5-35B-A3B sglang). TEACHER_TP is auto-derived from GPU count.
+# Teacher server (Qwen3-32B sglang). TEACHER_TP is auto-derived from GPU count.
 teacher_visible_gpus: 6,7
 # Ray cluster: covers both student rollout and student training GPUs.
 ray_visible_gpus: 0,1,2,3,4,5

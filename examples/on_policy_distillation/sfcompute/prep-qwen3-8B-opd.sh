@@ -202,11 +202,11 @@ else
     echo "Dataset JSONL already exists, skipping conversion."
 fi
 
-if [ ! -d "${POOL_DIR}/Qwen3.5-35B-A3B" ]; then
-    echo "Downloading Qwen3.5-35B-A3B (teacher)..."
-    hf_download Qwen/Qwen3.5-35B-A3B --local-dir "${POOL_DIR}/Qwen3.5-35B-A3B"
+if [ ! -d "${POOL_DIR}/Qwen3-32B" ]; then
+    echo "Downloading Qwen3-32B (teacher)..."
+    hf_download Qwen/Qwen3-32B --local-dir "${POOL_DIR}/Qwen3-32B"
 else
-    echo "Qwen3.5-35B-A3B already exists, skipping download."
+    echo "Qwen3-32B already exists, skipping download."
 fi
 
 if [ ! -d "${POOL_DIR}/Qwen3-8B" ]; then
