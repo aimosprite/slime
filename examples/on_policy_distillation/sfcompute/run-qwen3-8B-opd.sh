@@ -175,6 +175,13 @@ NUM_ROLLOUT=$(( NUM_STEPS * GLOBAL_BATCH_SIZE / NUM_ROLLOUT_DENOM ))
 
 ROOT_DIR="${ROOT_DIR:-$HOME}"
 POOL_DIR="${POOL_DIR:-${ROOT_DIR}/pool}"
+
+# Tee all output to a persistent log on the mounted volume
+RUN_LOG="${RUN_LOG:-${POOL_DIR}/run-qwen3-8B-opd.log}"
+mkdir -p "$(dirname "${RUN_LOG}")"
+exec > >(tee -a "${RUN_LOG}") 2>&1
+echo "=== Run started at $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
+echo "Log file: ${RUN_LOG}"
 MEGATRON_PATH="${MEGATRON_PATH:-${ROOT_DIR}/Megatron-LM}"
 TEACHER_VISIBLE_GPUS="${TEACHER_VISIBLE_GPUS:-${TEACHER_GPU:-6,7}}"
 TEACHER_TP="${TEACHER_TP:-$(awk -F',' '{print NF}' <<< "${TEACHER_VISIBLE_GPUS}")}"
