@@ -54,4 +54,13 @@ MODEL_ARGS=(
    # qwen3.5 specific
    --attention-output-gate
    --moe-shared-expert-gate
+
+   # hybrid linear/full attention (gated delta net)
+   --experimental-attention-variant gated_delta_net
+   --linear-attention-freq 4
+   --linear-conv-kernel-dim 4
+   --linear-key-head-dim 128
+   --linear-value-head-dim 128
+   --linear-num-key-heads 16
+   --linear-num-value-heads 32
 )
