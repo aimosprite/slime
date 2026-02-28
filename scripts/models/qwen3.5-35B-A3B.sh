@@ -11,7 +11,6 @@ for ((i=0; i<NLAYERS; i++)); do
 done
 
 printf -v MOE_LAYER_FREQ "[%s]" "$(IFS=', '; echo "${arr[*]}")"
-
 MODEL_ARGS=(
    --spec "slime_plugins.models.qwen3_5" "get_qwen3_5_spec"
 
@@ -23,7 +22,7 @@ MODEL_ARGS=(
    --kv-channels 256
    --num-layers 40
    --hidden-size 2048
-   --ffn-hidden-size 5120
+   --ffn-hidden-size 512
    --use-gated-attention
 
    --normalization RMSNorm
@@ -49,18 +48,9 @@ MODEL_ARGS=(
    --moe-token-drop-policy probs
    --moe-router-dtype fp32
    --moe-permute-fusion
-   --moe-aux-loss-coeff 0.001
+   --moe-aux-loss-coeff 0
 
    # qwen3.5 specific
    --attention-output-gate
    --moe-shared-expert-gate
-
-   # hybrid linear/full attention (gated delta net)
-   --experimental-attention-variant gated_delta_net
-   --linear-attention-freq 4
-   --linear-conv-kernel-dim 4
-   --linear-key-head-dim 128
-   --linear-value-head-dim 128
-   --linear-num-key-heads 16
-   --linear-num-value-heads 32
 )
