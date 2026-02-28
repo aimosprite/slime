@@ -35,6 +35,9 @@ actor_num_gpus_per_node: 2
 rollout_num_gpus: 2
 # Tensor parallel size for student training.
 tensor_model_parallel_size: 2
+# Expert tensor parallel size (split expert weights across TP ranks).
+# Set to match tensor_model_parallel_size for large MoE models to avoid OOM.
+expert_tensor_parallel_size: 2
 # Memory fractions for the two sglang servers.
 teacher_mem_fraction: 0.75
 sglang_mem_fraction_static: 0.6

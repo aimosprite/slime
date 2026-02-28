@@ -668,8 +668,8 @@ PERF_ARGS=(
    --sequence-parallel
    --pipeline-model-parallel-size 1
    --context-parallel-size 1
-   --expert-model-parallel-size 1
-   --expert-tensor-parallel-size 1
+   --expert-model-parallel-size "${EXPERT_MODEL_PARALLEL_SIZE:-1}"
+   --expert-tensor-parallel-size "${EXPERT_TENSOR_PARALLEL_SIZE:-1}"
    --recompute-granularity full
    --recompute-method uniform
    --recompute-num-layers 1
