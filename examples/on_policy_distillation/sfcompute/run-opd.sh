@@ -682,11 +682,14 @@ GRPO_ARGS=(
    --use-opd
    --opd-type sglang
    --opd-kl-coef "${OPD_KL_COEF}"
-   --use-kl-loss
    --kl-loss-coef "${KL_LOSS_COEF}"
    --kl-loss-type low_var_kl
    --entropy-coef "${ENTROPY_COEF}"
 )
+# Only load the reference model when kl_loss_coef > 0 (saves ~32 GiB GPU memory).
+if [ "$(echo "${KL_LOSS_COEF} > 0" | bc -l 2>/dev/null || echo 0)" = "1" ]; then
+   GRPO_ARGS+=(--use-kl-loss)
+fi
 
 OPTIMIZER_ARGS=(
    --optimizer adam
