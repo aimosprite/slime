@@ -243,19 +243,14 @@ CKPT_SAVE_DIR="${POOL_DIR}/${STUDENT_SHORT}_slime"
 STUDENT_TORCH_DIST="${POOL_DIR}/${STUDENT_SHORT}_torch_dist"
 HF_REPO_CREATED=0
 
+CHECKPOINT_HF_ORG="${CHECKPOINT_HF_ORG:-aimosprite}"
+
 resolve_hf_checkpoint_repo_id() {
     if [ -n "${CHECKPOINT_HF_REPO_ID}" ]; then
         return 0
     fi
 
-    local hf_user=""
-    hf_user="$(hf_get_username)"
-    if [ -z "${hf_user}" ]; then
-        echo "Failed to infer Hugging Face username. Set HF_TOKEN in .env, run 'hf auth login', or set CHECKPOINT_HF_REPO_ID."
-        return 1
-    fi
-
-    CHECKPOINT_HF_REPO_ID="${hf_user}/${CHECKPOINT_HF_REPO_BASENAME}"
+    CHECKPOINT_HF_REPO_ID="${CHECKPOINT_HF_ORG}/${CHECKPOINT_HF_REPO_BASENAME}"
     echo "Auto-selected Hugging Face checkpoint repo: ${CHECKPOINT_HF_REPO_ID}"
 }
 
@@ -580,7 +575,6 @@ CKPT_ARGS=(
 ROLLOUT_ARGS=(
    --prompt-data "${TRAIN_DATA}"
    --input-key prompt
-   --apply-chat-template
    --rollout-shuffle
    --num-rollout "${NUM_ROLLOUT}"
    --rollout-batch-size "${ROLLOUT_BATCH_SIZE}"
@@ -592,8 +586,9 @@ ROLLOUT_ARGS=(
 )
 
 RM_ARGS=(
-   --custom-rm-path examples.on_policy_distillation.on_policy_distillation.reward_func
-   --custom-reward-post-process-path examples.on_policy_distillation.on_policy_distillation.post_process_rewards
+   --custom-generate-function-path examples.on_policy_distillation.generate_with_tools.generate
+   --custom-rm-path examples.on_policy_distillation.generate_with_tools.reward_func
+   --custom-reward-post-process-path examples.on_policy_distillation.generate_with_tools.post_process_rewards
    --rm-url "http://${TEACHER_IP}:${TEACHER_PORT}/generate"
 )
 

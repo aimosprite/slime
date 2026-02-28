@@ -73,5 +73,11 @@ n_samples_per_eval_prompt: 4
 eval_max_response_len: 16384
 eval_temperature: 1
 
+# ── Tool calls ────────────────────────────────────────────────────────
+tool_max_turns: 8
+tool_max_tool_calls: 4
+tool_timeout: 30
+tool_concurrency: 32
+
 # ── Performance ───────────────────────────────────────────────────────
 max_tokens_per_gpu: 16384
