@@ -125,13 +125,20 @@ hf_upload() {
 }
 
 # Model config (fallbacks if train-config.yaml is absent)
-TEACHER_MODEL="${TEACHER_MODEL:-Qwen/Qwen3-32B}"
-STUDENT_MODEL="${STUDENT_MODEL:-Qwen/Qwen3-8B}"
-STUDENT_MODEL_ARGS="${STUDENT_MODEL_ARGS:-qwen3-8B.sh}"
+TEACHER_MODEL="${TEACHER_MODEL:-Qwen/Qwen3.5-122B-A10B}"
+STUDENT_MODEL="${STUDENT_MODEL:-Qwen/Qwen3.5-35B-A3B}"
+STUDENT_MODEL_ARGS="${STUDENT_MODEL_ARGS:-qwen3.5-35B-A3B.sh}"
 
-# Derive short names from HF model IDs (e.g. "Qwen/Qwen3-32B" -> "Qwen3-32B")
+# Derive short names from HF model IDs (e.g. "Qwen/Qwen3.5-122B-A10B" -> "Qwen3.5-122B-A10B")
 TEACHER_SHORT="${TEACHER_MODEL##*/}"
 STUDENT_SHORT="${STUDENT_MODEL##*/}"
+
+# Dataset config (fallbacks if train-config.yaml is absent)
+DATASET="${DATASET:-BytedTsinghua-SIA/DAPO-Math-17k}"
+DATASET_SHORT="$(echo "${DATASET##*/}" | tr '[:upper:]' '[:lower:]')"
+INPUT_KEY="${INPUT_KEY:-prompt}"
+LABEL_KEY="${LABEL_KEY:-reward_model}"
+EVAL_RM_TYPE="${EVAL_RM_TYPE:-dapo}"
 
 # Training hyperparameters (fallbacks if train-config.yaml is absent)
 NUM_STEPS="${NUM_STEPS:-300}"
@@ -205,15 +212,15 @@ exec > >(tee -a "${RUN_LOG}") 2>&1
 echo "=== Run started at $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
 echo "Log file: ${RUN_LOG}"
 MEGATRON_PATH="${MEGATRON_PATH:-${ROOT_DIR}/Megatron-LM}"
-TEACHER_VISIBLE_GPUS="${TEACHER_VISIBLE_GPUS:-${TEACHER_GPU:-6,7}}"
+TEACHER_VISIBLE_GPUS="${TEACHER_VISIBLE_GPUS:-${TEACHER_GPU:-4,5,6,7}}"
 TEACHER_TP="${TEACHER_TP:-$(awk -F',' '{print NF}' <<< "${TEACHER_VISIBLE_GPUS}")}"
-RAY_VISIBLE_GPUS="${RAY_VISIBLE_GPUS:-0,1,2,3,4,5}"
-ACTOR_NUM_GPUS_PER_NODE="${ACTOR_NUM_GPUS_PER_NODE:-4}"
-ROLLOUT_NUM_GPUS="${ROLLOUT_NUM_GPUS:-1}"
-TENSOR_MODEL_PARALLEL_SIZE="${TENSOR_MODEL_PARALLEL_SIZE:-4}"
+RAY_VISIBLE_GPUS="${RAY_VISIBLE_GPUS:-0,1,2,3}"
+ACTOR_NUM_GPUS_PER_NODE="${ACTOR_NUM_GPUS_PER_NODE:-2}"
+ROLLOUT_NUM_GPUS="${ROLLOUT_NUM_GPUS:-2}"
+TENSOR_MODEL_PARALLEL_SIZE="${TENSOR_MODEL_PARALLEL_SIZE:-2}"
 TEACHER_PORT="${TEACHER_PORT:-13141}"
-TEACHER_MEM_FRACTION="${TEACHER_MEM_FRACTION:-0.6}"
-SGLANG_MEM_FRACTION_STATIC="${SGLANG_MEM_FRACTION_STATIC:-0.4}"
+TEACHER_MEM_FRACTION="${TEACHER_MEM_FRACTION:-0.75}"
+SGLANG_MEM_FRACTION_STATIC="${SGLANG_MEM_FRACTION_STATIC:-0.6}"
 MAX_TEACHER_WAIT_SEC="${MAX_TEACHER_WAIT_SEC:-300}"
 ENABLE_EVAL="${ENABLE_EVAL:-1}"
 WANDB_PROJECT="${WANDB_PROJECT:-slime-dev}"
@@ -545,10 +552,10 @@ sleep 10
 export PYTHONUNBUFFERED=1
 source "${REPO_DIR}/scripts/models/${STUDENT_MODEL_ARGS}"
 
-DATA_DIR="${POOL_DIR}/dapo-math-17k"
-TRAIN_DATA="${DATA_DIR}/dapo-math-17k-train.jsonl"
-EVAL_DATA="${DATA_DIR}/dapo-math-17k-eval.jsonl"
-FALLBACK_DATA="${DATA_DIR}/dapo-math-17k.jsonl"
+DATA_DIR="${POOL_DIR}/${DATASET_SHORT}"
+TRAIN_DATA="${DATA_DIR}/${DATASET_SHORT}-train.jsonl"
+EVAL_DATA="${DATA_DIR}/${DATASET_SHORT}-eval.jsonl"
+FALLBACK_DATA="${DATA_DIR}/${DATASET_SHORT}.jsonl"
 if [ ! -f "${TRAIN_DATA}" ] && [ -f "${FALLBACK_DATA}" ]; then
     TRAIN_DATA="${FALLBACK_DATA}"
 fi
@@ -574,7 +581,7 @@ CKPT_ARGS=(
 
 ROLLOUT_ARGS=(
    --prompt-data "${TRAIN_DATA}"
-   --input-key prompt
+   --input-key "${INPUT_KEY}"
    --rollout-shuffle
    --num-rollout "${NUM_ROLLOUT}"
    --rollout-batch-size "${ROLLOUT_BATCH_SIZE}"
@@ -594,7 +601,7 @@ RM_ARGS=(
 
 EVAL_ARGS=()
 if [ "${ENABLE_EVAL}" = "1" ]; then
-   # Generate eval config YAML that uses dapo accuracy grading (not the teacher RM)
+   # Generate eval config YAML that uses rule-based grading (not the teacher RM)
    EVAL_CONFIG_FILE="/tmp/slime_eval_config.yaml"
    cat > "${EVAL_CONFIG_FILE}" <<EVALEOF
 defaults:
@@ -605,9 +612,9 @@ defaults:
 datasets:
   eval:
     path: ${EVAL_DATA}
-    input_key: prompt
-    label_key: reward_model
-    rm_type: dapo
+    input_key: ${INPUT_KEY}
+    label_key: ${LABEL_KEY}
+    rm_type: ${EVAL_RM_TYPE}
 EVALEOF
    EVAL_ARGS=(
       --eval-interval "${EVAL_INTERVAL}"

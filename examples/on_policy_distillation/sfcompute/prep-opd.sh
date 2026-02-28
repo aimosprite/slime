@@ -34,11 +34,15 @@ REPO_DIR="${REPO_DIR:-${REPO_DIR_DEFAULT}}"
 HF_CLI=""
 
 # Model config
-TEACHER_MODEL="${TEACHER_MODEL:-Qwen/Qwen3-32B}"
-STUDENT_MODEL="${STUDENT_MODEL:-Qwen/Qwen3-8B}"
-STUDENT_MODEL_ARGS="${STUDENT_MODEL_ARGS:-qwen3-8B.sh}"
+TEACHER_MODEL="${TEACHER_MODEL:-Qwen/Qwen3.5-122B-A10B}"
+STUDENT_MODEL="${STUDENT_MODEL:-Qwen/Qwen3.5-35B-A3B}"
+STUDENT_MODEL_ARGS="${STUDENT_MODEL_ARGS:-qwen3.5-35B-A3B.sh}"
 TEACHER_SHORT="${TEACHER_MODEL##*/}"
 STUDENT_SHORT="${STUDENT_MODEL##*/}"
+
+# Dataset config
+DATASET="${DATASET:-BytedTsinghua-SIA/DAPO-Math-17k}"
+DATASET_SHORT="$(echo "${DATASET##*/}" | tr '[:upper:]' '[:lower:]')"
 
 # Resolve model paths: local absolute paths are used directly, HF IDs resolve to POOL_DIR.
 if [[ "${TEACHER_MODEL}" == /* ]]; then
@@ -179,34 +183,29 @@ fi
 
 mkdir -p "${POOL_DIR}"
 
-DATA_DIR="${POOL_DIR}/dapo-math-17k"
-DATA_JSONL="${DATA_DIR}/dapo-math-17k.jsonl"
-DATA_PARQUET="${DATA_DIR}/data/dapo-math-17k.parquet"
-DATA_PARQUET_ALT="${DATA_DIR}/dapo-math-17k.parquet"
+DATA_DIR="${POOL_DIR}/${DATASET_SHORT}"
+DATA_JSONL="${DATA_DIR}/${DATASET_SHORT}.jsonl"
+TRAIN_JSONL="${DATA_DIR}/${DATASET_SHORT}-train.jsonl"
+EVAL_JSONL="${DATA_DIR}/${DATASET_SHORT}-eval.jsonl"
 
-if [ ! -f "${DATA_PARQUET}" ] && [ ! -f "${DATA_PARQUET_ALT}" ]; then
-    echo "Downloading DAPO-Math-17k dataset..."
+# Download the dataset from HuggingFace if no parquet files exist locally.
+FOUND_PARQUET="$(find "${DATA_DIR}" -name '*.parquet' 2>/dev/null | head -1 || true)"
+if [ -z "${FOUND_PARQUET}" ]; then
+    echo "Downloading dataset ${DATASET}..."
     mkdir -p "${DATA_DIR}"
-    hf_download BytedTsinghua-SIA/DAPO-Math-17k \
+    hf_download "${DATASET}" \
         --repo-type dataset \
         --local-dir "${DATA_DIR}"
 fi
 
-PARQUET_INPUT=""
-if [ -f "${DATA_PARQUET}" ]; then
-    PARQUET_INPUT="${DATA_PARQUET}"
-elif [ -f "${DATA_PARQUET_ALT}" ]; then
-    PARQUET_INPUT="${DATA_PARQUET_ALT}"
-else
-    echo "Dataset parquet not found after download."
-    echo "Expected one of:"
-    echo "  ${DATA_PARQUET}"
-    echo "  ${DATA_PARQUET_ALT}"
+# Locate the first parquet file in the downloaded directory.
+PARQUET_INPUT="$(find "${DATA_DIR}" -name '*.parquet' 2>/dev/null | head -1 || true)"
+if [ -z "${PARQUET_INPUT}" ]; then
+    echo "No .parquet file found in ${DATA_DIR} after download."
+    echo "Check that dataset '${DATASET}' exists on HuggingFace."
     exit 1
 fi
-
-TRAIN_JSONL="${DATA_DIR}/dapo-math-17k-train.jsonl"
-EVAL_JSONL="${DATA_DIR}/dapo-math-17k-eval.jsonl"
+echo "Using parquet: ${PARQUET_INPUT}"
 
 if [ ! -f "${DATA_JSONL}" ] && [ ! -f "${TRAIN_JSONL}" ]; then
     echo "Converting dataset parquet to JSONL with train/eval split..."
@@ -224,13 +223,19 @@ df = pd.read_parquet(parquet_input)
 df.to_json(data_jsonl, orient="records", lines=True)
 print(f"Wrote {len(df)} rows to {data_jsonl}")
 
-# Create train/eval split (last 500 rows for eval)
-eval_size = min(500, len(df) // 10)
-train_df = df.iloc[:-eval_size]
-eval_df = df.iloc[-eval_size:]
-train_df.to_json(train_jsonl, orient="records", lines=True)
-eval_df.to_json(eval_jsonl, orient="records", lines=True)
-print(f"Split: {len(train_df)} train, {len(eval_df)} eval")
+# Create train/eval split (last 10% for eval, at least 1 row)
+eval_size = max(1, min(500, len(df) // 10))
+if len(df) <= eval_size:
+    # Dataset too small to split; use all rows for both train and eval.
+    df.to_json(train_jsonl, orient="records", lines=True)
+    df.to_json(eval_jsonl, orient="records", lines=True)
+    print(f"Dataset has only {len(df)} rows; using all for both train and eval.")
+else:
+    train_df = df.iloc[:-eval_size]
+    eval_df = df.iloc[-eval_size:]
+    train_df.to_json(train_jsonl, orient="records", lines=True)
+    eval_df.to_json(eval_jsonl, orient="records", lines=True)
+    print(f"Split: {len(train_df)} train, {len(eval_df)} eval")
 PY
 else
     echo "Dataset JSONL already exists, skipping conversion."

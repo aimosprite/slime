@@ -2,27 +2,42 @@
 # Edit this file to tune a run. Env vars always take precedence over values here.
 # Paths stay in config-8xh100.env; GPU layout has moved here.
 
+# ── Dataset ──────────────────────────────────────────────────────────
+# HuggingFace dataset ID. The prep script downloads & converts it to JSONL.
+# Examples:
+#   BytedTsinghua-SIA/DAPO-Math-17k   (default, math reasoning)
+#   OpenEvals/IMO-AnswerBench          (400 IMO short-answer problems)
+dataset: OpenEvals/IMO-AnswerBench
+# Field name used as the prompt (varies per dataset).
+input_key: Problem
+# Field name used as the ground-truth label for eval grading.
+label_key: Short Answer
+# Reward model type for evaluation. Available: dapo, math, boxed_math,
+# deepscaler, f1, gpqa, ifbench, remote_rm.
+eval_rm_type: math
+
 # ── Models ────────────────────────────────────────────────────────────
 # HuggingFace model IDs for teacher and student.
-teacher_model: Qwen/Qwen3-32B
-student_model: Qwen/Qwen3-8B
+teacher_model: Qwen/Qwen3.5-122B-A10B
+student_model: Qwen/Qwen3.5-35B-A3B
 # Model args script for the student (under scripts/models/).
-student_model_args: qwen3-8B.sh
+student_model_args: qwen3.5-35B-A3B.sh
 
 # ── GPU allocation ────────────────────────────────────────────────────
 # Teacher server (sglang). TEACHER_TP is auto-derived from GPU count.
-teacher_visible_gpus: 6,7
+# 122B-A10B needs a wider tensor-parallel shard than the old 32B teacher.
+teacher_visible_gpus: 4,5,6,7
 # Ray cluster: covers both student rollout and student training GPUs.
-ray_visible_gpus: 0,1,2,3,4,5
+ray_visible_gpus: 0,1,2,3
 # Student training (gradient updates). Must satisfy: actor_num_gpus_per_node + rollout_num_gpus <= len(ray_visible_gpus).
 actor_num_gpus_per_node: 2
 # Student rollout engine (sglang within Ray).
-rollout_num_gpus: 4
+rollout_num_gpus: 2
 # Tensor parallel size for student training.
 tensor_model_parallel_size: 2
 # Memory fractions for the two sglang servers.
-teacher_mem_fraction: 0.6
-sglang_mem_fraction_static: 0.4
+teacher_mem_fraction: 0.75
+sglang_mem_fraction_static: 0.6
 
 # ── Training duration ─────────────────────────────────────────────────
 # num_steps controls total gradient updates.
