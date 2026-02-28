@@ -21,31 +21,7 @@ git clone -b rohin/opd-sfcompute https://github.com/aimosprite/slime.git
 cd ~/slime
 ```
 
-### 2) Configure `train-config.yaml` on Node A
-
-Set at minimum:
-
-```yaml
-cluster_num_nodes: 2
-gpus_per_node: 8
-ray_head_ip: <NODE_A_IP>
-teacher_ip: <NODE_A_IP>
-```
-
-Use Node A reachable IP (private/LAN preferred).  
-Quick way to get it on Node A: `hostname -I | awk '{print $1}'`.
-
-### 3) Start worker role on Node B
-
-On **Node B**:
-
-```bash
-bash examples/on_policy_distillation/sfcompute/setup.sh student
-```
-
-This now does everything for worker mode: installs Docker/tooling if needed, pulls image, and starts a blocking Ray worker in Docker.
-
-### 4) Start teacher/head role on Node A
+### 2) Start teacher/head role on Node A
 
 On **Node A**:
 
@@ -53,7 +29,20 @@ On **Node A**:
 bash examples/on_policy_distillation/sfcompute/setup.sh teacher
 ```
 
-This does everything for head mode: installs tooling, creates `.env` if needed, and launches OPD training.
+This does everything for head mode: installs tooling, auto-detects the node IP, writes it into `train-config.yaml` (`ray_head_ip` + `teacher_ip`), creates `.env` if needed, and launches OPD training.
+
+It also prints the exact student command to run.
+For 2-node configs, it pauses and asks you to press Enter after the student worker is up.
+
+### 3) Start worker role on Node B (using teacher IP)
+
+On **Node B**, run the command printed by teacher setup:
+
+```bash
+bash examples/on_policy_distillation/sfcompute/setup.sh student <NODE_A_IP>
+```
+
+This does everything for worker mode: installs Docker/tooling if needed, pulls image, and starts a blocking Ray worker in Docker connected to the teacher/head IP.
 
 Use tmux on both nodes if desired:
 
@@ -71,7 +60,7 @@ Detach with `Ctrl-b d`, reattach with `tmux attach -t opd`.
 4. `teacher`/`single` mode: prompts for `.env` tokens (`WANDB_API_KEY`, `HF_TOKEN`, optional `CHECKPOINT_HF_REPO_ID`) if missing.
 5. Launches role:
    - `teacher`/`single` -> `docker-run.sh train`
-   - `student` -> `docker-run.sh worker` (joins Ray cluster and blocks)
+   - `student <teacher_ip>` -> `docker-run.sh worker` (joins Ray cluster and blocks)
 
 ## Commands summary
 
@@ -84,7 +73,7 @@ bash examples/on_policy_distillation/sfcompute/setup.sh teacher
 - Node B (student worker):
 
 ```bash
-bash examples/on_policy_distillation/sfcompute/setup.sh student
+bash examples/on_policy_distillation/sfcompute/setup.sh student <NODE_A_IP>
 ```
 
 ## Files

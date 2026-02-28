@@ -5,13 +5,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 TRAIN_CONFIG="${TRAIN_CONFIG:-${SCRIPT_DIR}/train-config.yaml}"
 MODE="${1:-single}"
+ROLE_IP_ARG="${2:-}"
 
 usage() {
     cat <<EOF
 Usage:
   bash examples/on_policy_distillation/sfcompute/setup.sh single   # one-node flow (default)
   bash examples/on_policy_distillation/sfcompute/setup.sh teacher  # two-node head/teacher
-  bash examples/on_policy_distillation/sfcompute/setup.sh student  # two-node worker
+  bash examples/on_policy_distillation/sfcompute/setup.sh student <teacher_ip>  # two-node worker
 EOF
 }
 
@@ -108,6 +109,56 @@ detect_gpu_count() {
     nvidia-smi -L 2>/dev/null | wc -l | tr -d ' '
 }
 
+write_train_config_ips() {
+    local ip="$1"
+    if [ -z "${ip}" ] || [ "${ip}" = "127.0.0.1" ]; then
+        return 1
+    fi
+    if [ ! -f "${TRAIN_CONFIG}" ]; then
+        echo "train-config not found at ${TRAIN_CONFIG}; skipping IP write."
+        return 0
+    fi
+    python3 - "${TRAIN_CONFIG}" "${ip}" <<'PY'
+import re
+import sys
+path, ip = sys.argv[1], sys.argv[2]
+with open(path, encoding="utf-8") as f:
+    lines = f.readlines()
+
+def upsert(key: str):
+    pat = re.compile(rf"^\s*{re.escape(key)}\s*:")
+    for i, line in enumerate(lines):
+        if pat.match(line):
+            lines[i] = f"{key}: {ip}\n"
+            return True
+    return False
+
+have_ray = upsert("ray_head_ip")
+have_teacher = upsert("teacher_ip")
+
+if not have_ray or not have_teacher:
+    insert_at = None
+    for i, line in enumerate(lines):
+        if line.strip().startswith("ray_visible_gpus:"):
+            insert_at = i
+            break
+    add_lines = []
+    if not have_ray:
+        add_lines.append(f"ray_head_ip: {ip}\n")
+    if not have_teacher:
+        add_lines.append(f"teacher_ip: {ip}\n")
+    if add_lines:
+        if insert_at is None:
+            lines.extend(["\n"] + add_lines)
+        else:
+            lines[insert_at:insert_at] = add_lines
+
+with open(path, "w", encoding="utf-8") as f:
+    f.writelines(lines)
+PY
+    echo "Updated ${TRAIN_CONFIG}: ray_head_ip=${ip}, teacher_ip=${ip}"
+}
+
 # ── 5. Create .env ──────────────────────────────────────────────────
 create_dotenv() {
     local env_file="${REPO_DIR}/.env"
@@ -180,6 +231,10 @@ case "${MODE}" in
 esac
 
 load_train_config_env
+if [ "${MODE}" = "student" ] && [ -n "${ROLE_IP_ARG}" ]; then
+    export RAY_HEAD_IP="${ROLE_IP_ARG}"
+    export TEACHER_IP="${ROLE_IP_ARG}"
+fi
 install_docker
 install_nvidia_toolkit
 verify_gpu
@@ -192,6 +247,20 @@ else
         export RAY_HEAD_IP="$(detect_primary_ip)"
         export TEACHER_IP="${TEACHER_IP:-${RAY_HEAD_IP}}"
         echo "Auto-detected RAY_HEAD_IP=${RAY_HEAD_IP}"
+        write_train_config_ips "${RAY_HEAD_IP}" || true
+        echo "Run this on the student node:"
+        echo "  bash examples/on_policy_distillation/sfcompute/setup.sh student ${RAY_HEAD_IP}"
+    elif [ "${MODE}" = "teacher" ]; then
+        write_train_config_ips "${RAY_HEAD_IP}" || true
+        echo "Run this on the student node:"
+        echo "  bash examples/on_policy_distillation/sfcompute/setup.sh student ${RAY_HEAD_IP}"
+    fi
+    if [ "${MODE}" = "teacher" ] && [[ "${CLUSTER_NUM_NODES:-1}" =~ ^[0-9]+$ ]] && [ "${CLUSTER_NUM_NODES:-1}" -gt 1 ]; then
+        echo ""
+        echo "Waiting for student worker startup."
+        echo "Run this on the student node first, then come back:"
+        echo "  bash examples/on_policy_distillation/sfcompute/setup.sh student ${RAY_HEAD_IP}"
+        read -rp "Press Enter once student worker is running... " _
     fi
     launch_training
 fi
