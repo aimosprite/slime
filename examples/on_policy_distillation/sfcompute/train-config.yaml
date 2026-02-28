@@ -24,28 +24,58 @@ student_model: Qwen/Qwen3.5-35B-A3B
 student_model_args: qwen3.5-35B-A3B.sh
 
 # ── GPU allocation ────────────────────────────────────────────────────
-# Teacher server (sglang).
-# 122B-A10B is ~97% expert params, so expert-parallel is the only way to shard
-# it across GPUs. TP=1/EP=4 gives ~64.6 GiB/rank on 4 H100s.
-teacher_visible_gpus: 4,5,6,7
-teacher_tp: 4
-teacher_ep: 4
-# Ray cluster: all 4 GPUs shared between training and rollout (colocate mode).
-ray_visible_gpus: 0,1,2,3
-# Student training uses all 4 GPUs (TP=2, EMP=2, ETP=2 → ~8.5B params/rank).
-# Rollout shares the same GPUs via weight offloading (--colocate).
-actor_num_gpus_per_node: 4
-# Tensor parallel size for student training.
-# Max TP=2 because num_query_groups=2 must be divisible by TP.
-tensor_model_parallel_size: 2
-# Expert model parallel size (split expert count across EMP groups).
-expert_model_parallel_size: 2
-# Expert tensor parallel size (split expert weights across TP ranks).
-expert_tensor_parallel_size: 2
-# Memory fractions for the two sglang servers.
-# With TP=4/EP=4 the teacher model takes ~59.6 GiB/rank.
-# mem_fraction_static is fraction of total GPU memory for model + KV cache.
-# 0.90 * 79.2 = 71.3 GiB total → ~11.7 GiB for KV cache after model.
+# Cluster defaults:
+# - 2 nodes total
+# - 8 GPUs per node
+# Node 1 runs teacher + Ray head; node 2 runs student workers.
+cluster_num_nodes: 2
+gpus_per_node: 8
+# Optional override for student GPUs per worker node.
+# If omitted, defaults to gpus_per_node for multi-node, or gpus_per_node/2 for single-node.
+# num_gpus: 8
+
+# Teacher server (sglang) GPU mapping.
+# If omitted:
+# - multi-node: uses all local GPUs (0..gpus_per_node-1)
+# - single-node: uses upper half GPUs (e.g. 4..7 on 8-GPU host)
+# teacher_visible_gpus: 0,1,2,3,4,5,6,7
+# teacher_tp: 8
+# teacher_ep: 8
+
+# Networking:
+# - ray_head_ip: IP address of this (head/teacher) node, reachable by worker nodes.
+# - teacher_ip: URL host used by workers to reach teacher sglang.
+#   Usually same as ray_head_ip.
+# For multi-node, set these explicitly to node-1 reachable IP.
+# ray_head_ip: 10.x.x.x
+# teacher_ip: 10.x.x.x
+
+# Ray/local student GPUs:
+# - auto: cluster-aware default (none on multi-node head; 0..num_gpus-1 on single-node)
+# - none: reserve 0 GPUs on head node (for 2-node teacher/head + worker setup)
+# - CSV: explicit list, e.g. "0,1,2,3"
+ray_visible_gpus: auto
+# Optional override for actor worker node count.
+# Defaults to cluster_num_nodes - 1 (or 1 for single-node).
+# actor_num_nodes: 1
+
+# Optional overrides (usually leave commented; defaults derive from num_gpus):
+# actor_num_gpus_per_node: 8
+# tensor_model_parallel_size: 2
+# expert_model_parallel_size: 2
+# expert_tensor_parallel_size: 2
+# rollout_num_gpus_per_engine: 8
+# sglang_expert_parallel_size: 8
+
+# Memory/runtime knobs.
+# use_colocate defaults to 0 on multi-node, 1 on single-node.
+# use_cpu_optimizer_offload defaults to 0 on multi-node, 1 on single-node.
+# train_memory_margin_bytes defaults to 1GiB on multi-node, 256MiB on single-node.
+# use_colocate: 0
+# use_cpu_optimizer_offload: 0
+# train_memory_margin_bytes: 1073741824
+
+# Memory fractions for teacher and student rollout sglang servers.
 teacher_mem_fraction: 0.90
 sglang_mem_fraction_static: 0.6
 

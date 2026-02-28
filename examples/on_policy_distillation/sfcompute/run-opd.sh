@@ -240,26 +240,201 @@ exec > >(tee -a "${RUN_LOG}") 2>&1
 echo "=== Run started at $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
 echo "Log file: ${RUN_LOG}"
 MEGATRON_PATH="${MEGATRON_PATH:-${ROOT_DIR}/Megatron-LM}"
-TEACHER_VISIBLE_GPUS="${TEACHER_VISIBLE_GPUS:-${TEACHER_GPU:-4,5,6,7}}"
-TEACHER_NUM_GPUS="$(awk -F',' '{print NF}' <<< "${TEACHER_VISIBLE_GPUS}")"
-TEACHER_EP="${TEACHER_EP:-1}"
-TEACHER_TP="${TEACHER_TP:-$(( TEACHER_NUM_GPUS / TEACHER_EP ))}"
-RAY_VISIBLE_GPUS="${RAY_VISIBLE_GPUS:-0,1,2,3}"
-ACTOR_NUM_GPUS_PER_NODE="${ACTOR_NUM_GPUS_PER_NODE:-4}"
-TENSOR_MODEL_PARALLEL_SIZE="${TENSOR_MODEL_PARALLEL_SIZE:-4}"
+count_csv_items() {
+    local csv="$1"
+    if [ -z "${csv// }" ]; then
+        echo 0
+        return 0
+    fi
+    awk -F',' '{print NF}' <<< "${csv}"
+}
+build_default_gpu_csv() {
+    local n="$1"
+    if [ "${n}" -le 0 ]; then
+        echo ""
+        return 0
+    fi
+    local csv=""
+    local i=0
+    while [ "${i}" -lt "${n}" ]; do
+        if [ -z "${csv}" ]; then
+            csv="${i}"
+        else
+            csv="${csv},${i}"
+        fi
+        i=$((i + 1))
+    done
+    echo "${csv}"
+}
+build_gpu_csv_range() {
+    local start="$1"
+    local end="$2"
+    if [ "${end}" -lt "${start}" ]; then
+        echo ""
+        return 0
+    fi
+    local csv=""
+    local i="${start}"
+    while [ "${i}" -le "${end}" ]; do
+        if [ -z "${csv}" ]; then
+            csv="${i}"
+        else
+            csv="${csv},${i}"
+        fi
+        i=$((i + 1))
+    done
+    echo "${csv}"
+}
+detect_primary_ip() {
+    python3 - <<'PY'
+import socket
+ip = "127.0.0.1"
+try:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.connect(("8.8.8.8", 80))
+    ip = s.getsockname()[0]
+    s.close()
+except Exception:
+    pass
+print(ip)
+PY
+}
+CLUSTER_NUM_NODES="${CLUSTER_NUM_NODES:-2}"
+GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
+if ! [[ "${CLUSTER_NUM_NODES}" =~ ^[0-9]+$ ]] || [ "${CLUSTER_NUM_NODES}" -le 0 ]; then
+    echo "CLUSTER_NUM_NODES must be a positive integer; got '${CLUSTER_NUM_NODES}'."
+    exit 1
+fi
+if ! [[ "${GPUS_PER_NODE}" =~ ^[0-9]+$ ]] || [ "${GPUS_PER_NODE}" -le 0 ]; then
+    echo "GPUS_PER_NODE must be a positive integer; got '${GPUS_PER_NODE}'."
+    exit 1
+fi
+if [ -z "${TEACHER_VISIBLE_GPUS+x}" ] || [ -z "${TEACHER_VISIBLE_GPUS}" ]; then
+    if [ -n "${TEACHER_GPU:-}" ]; then
+        TEACHER_VISIBLE_GPUS="${TEACHER_GPU}"
+    elif [ "${CLUSTER_NUM_NODES}" -gt 1 ]; then
+        TEACHER_VISIBLE_GPUS="$(build_default_gpu_csv "${GPUS_PER_NODE}")"
+    else
+        SINGLE_NODE_TEACHER_START=$(( GPUS_PER_NODE / 2 ))
+        if [ "${SINGLE_NODE_TEACHER_START}" -le 0 ]; then
+            SINGLE_NODE_TEACHER_START=0
+        fi
+        TEACHER_VISIBLE_GPUS="$(build_gpu_csv_range "${SINGLE_NODE_TEACHER_START}" "$((GPUS_PER_NODE - 1))")"
+    fi
+fi
+if [ -z "${NUM_GPUS+x}" ] || [ -z "${NUM_GPUS}" ]; then
+    if [ "${CLUSTER_NUM_NODES}" -gt 1 ]; then
+        NUM_GPUS="${GPUS_PER_NODE}"
+    else
+        NUM_GPUS=$(( GPUS_PER_NODE / 2 ))
+        if [ "${NUM_GPUS}" -le 0 ]; then
+            NUM_GPUS=1
+        fi
+    fi
+fi
+if ! [[ "${NUM_GPUS}" =~ ^[0-9]+$ ]] || [ "${NUM_GPUS}" -le 0 ]; then
+    echo "NUM_GPUS must be a positive integer; got '${NUM_GPUS}'."
+    exit 1
+fi
+DEFAULT_RAY_VISIBLE_GPUS="$(build_default_gpu_csv "${NUM_GPUS}")"
+TEACHER_NUM_GPUS="$(count_csv_items "${TEACHER_VISIBLE_GPUS}")"
+TEACHER_EP="${TEACHER_EP:-${TEACHER_NUM_GPUS}}"
+TEACHER_TP="${TEACHER_TP:-${TEACHER_NUM_GPUS}}"
+# RAY_VISIBLE_GPUS controls local GPUs visible to the Ray head process.
+# Values:
+#   - unset / "auto" -> cluster-aware default
+#   - "none"         -> no local GPUs (teacher-only head node)
+#   - explicit CSV   -> use that list
+if [ -z "${RAY_VISIBLE_GPUS+x}" ] || [ -z "${RAY_VISIBLE_GPUS}" ] || [ "${RAY_VISIBLE_GPUS}" = "auto" ]; then
+    if [ "${CLUSTER_NUM_NODES}" -gt 1 ]; then
+        RAY_VISIBLE_GPUS=""
+    else
+        RAY_VISIBLE_GPUS="${DEFAULT_RAY_VISIBLE_GPUS}"
+    fi
+elif [ "${RAY_VISIBLE_GPUS}" = "none" ]; then
+    RAY_VISIBLE_GPUS=""
+fi
+ACTOR_NUM_GPUS_PER_NODE="${ACTOR_NUM_GPUS_PER_NODE:-${NUM_GPUS}}"
+if [ -z "${ACTOR_NUM_NODES+x}" ] || [ -z "${ACTOR_NUM_NODES}" ]; then
+    if [ "${CLUSTER_NUM_NODES}" -gt 1 ]; then
+        ACTOR_NUM_NODES=$(( CLUSTER_NUM_NODES - 1 ))
+    else
+        ACTOR_NUM_NODES=1
+    fi
+fi
+DEFAULT_STUDENT_PARALLEL_SIZE=2
+if [ "${NUM_GPUS}" -lt 2 ]; then
+    DEFAULT_STUDENT_PARALLEL_SIZE=1
+fi
+TENSOR_MODEL_PARALLEL_SIZE="${TENSOR_MODEL_PARALLEL_SIZE:-${DEFAULT_STUDENT_PARALLEL_SIZE}}"
+EXPERT_MODEL_PARALLEL_SIZE="${EXPERT_MODEL_PARALLEL_SIZE:-${DEFAULT_STUDENT_PARALLEL_SIZE}}"
+EXPERT_TENSOR_PARALLEL_SIZE="${EXPERT_TENSOR_PARALLEL_SIZE:-${DEFAULT_STUDENT_PARALLEL_SIZE}}"
+ROLLOUT_NUM_GPUS_PER_ENGINE="${ROLLOUT_NUM_GPUS_PER_ENGINE:-${ACTOR_NUM_GPUS_PER_NODE}}"
+SGLANG_EXPERT_PARALLEL_SIZE="${SGLANG_EXPERT_PARALLEL_SIZE:-${ACTOR_NUM_GPUS_PER_NODE}}"
+USE_COLOCATE="${USE_COLOCATE:-}"
+if [ -z "${USE_CPU_OPTIMIZER_OFFLOAD+x}" ] || [ -z "${USE_CPU_OPTIMIZER_OFFLOAD}" ]; then
+    if [ "${CLUSTER_NUM_NODES}" -gt 1 ]; then
+        USE_CPU_OPTIMIZER_OFFLOAD=0
+    else
+        USE_CPU_OPTIMIZER_OFFLOAD=1
+    fi
+fi
+if [ -z "${TRAIN_MEMORY_MARGIN_BYTES+x}" ] || [ -z "${TRAIN_MEMORY_MARGIN_BYTES}" ]; then
+    if [ "${CLUSTER_NUM_NODES}" -gt 1 ]; then
+        TRAIN_MEMORY_MARGIN_BYTES=$((1024 * 1024 * 1024))
+    else
+        TRAIN_MEMORY_MARGIN_BYTES=$((256 * 1024 * 1024))
+    fi
+fi
 TEACHER_PORT="${TEACHER_PORT:-13141}"
 TEACHER_MEM_FRACTION="${TEACHER_MEM_FRACTION:-0.75}"
 SGLANG_MEM_FRACTION_STATIC="${SGLANG_MEM_FRACTION_STATIC:-0.6}"
+if [ -z "${RAY_HEAD_IP+x}" ] || [ -z "${RAY_HEAD_IP}" ]; then
+    if [ "${CLUSTER_NUM_NODES}" -gt 1 ]; then
+        RAY_HEAD_IP="$(detect_primary_ip)"
+    else
+        RAY_HEAD_IP="${MASTER_ADDR:-127.0.0.1}"
+    fi
+fi
+MASTER_ADDR="${MASTER_ADDR:-${RAY_HEAD_IP}}"
+TEACHER_IP="${TEACHER_IP:-${RAY_HEAD_IP}}"
 MAX_TEACHER_WAIT_SEC="${MAX_TEACHER_WAIT_SEC:-300}"
 ENABLE_EVAL="${ENABLE_EVAL:-1}"
 WANDB_PROJECT="${WANDB_PROJECT:-slime-dev}"
 WANDB_GROUP="${WANDB_GROUP:-${TEACHER_SHORT}-to-${STUDENT_SHORT}-opd}"
 
-NUM_GPUS="$(awk -F',' '{print NF}' <<< "${RAY_VISIBLE_GPUS}")"
-if [ "${ACTOR_NUM_GPUS_PER_NODE}" -gt "${NUM_GPUS}" ]; then
+RAY_NUM_GPUS="$(count_csv_items "${RAY_VISIBLE_GPUS}")"
+if [ -z "${USE_COLOCATE}" ]; then
+    if [ "${CLUSTER_NUM_NODES}" -gt 1 ] || [ "${RAY_NUM_GPUS}" -eq 0 ]; then
+        USE_COLOCATE=0
+    else
+        USE_COLOCATE=1
+    fi
+fi
+if [ "${ACTOR_NUM_NODES}" -eq 1 ] && [ "${RAY_NUM_GPUS}" -gt 0 ] && [ "${ACTOR_NUM_GPUS_PER_NODE}" -gt "${RAY_NUM_GPUS}" ]; then
     echo "Invalid GPU layout:"
-    echo "  RAY_VISIBLE_GPUS=${RAY_VISIBLE_GPUS} (${NUM_GPUS} GPUs)"
+    echo "  RAY_VISIBLE_GPUS=${RAY_VISIBLE_GPUS} (${RAY_NUM_GPUS} GPUs)"
     echo "  ACTOR_NUM_GPUS_PER_NODE=${ACTOR_NUM_GPUS_PER_NODE}"
+    exit 1
+fi
+if [ "${TEACHER_NUM_GPUS}" -le 0 ]; then
+    echo "Invalid teacher GPU layout: TEACHER_VISIBLE_GPUS='${TEACHER_VISIBLE_GPUS}'"
+    exit 1
+fi
+if [ "${TEACHER_TP}" -le 0 ] || [ "${TEACHER_EP}" -le 0 ]; then
+    echo "Invalid teacher parallelism: TEACHER_TP=${TEACHER_TP}, TEACHER_EP=${TEACHER_EP}"
+    exit 1
+fi
+if [ "${TEACHER_TP}" -ne "${TEACHER_NUM_GPUS}" ]; then
+    echo "Teacher parallelism mismatch:"
+    echo "  TEACHER_VISIBLE_GPUS=${TEACHER_VISIBLE_GPUS} (${TEACHER_NUM_GPUS} GPUs)"
+    echo "  TEACHER_TP=${TEACHER_TP}, TEACHER_EP=${TEACHER_EP}"
+    echo "  Expected TEACHER_TP == TEACHER_NUM_GPUS"
+    exit 1
+fi
+if [ "${TEACHER_EP}" -gt "${TEACHER_TP}" ]; then
+    echo "Invalid teacher parallelism for sglang:"
+    echo "  TEACHER_EP=${TEACHER_EP} must be <= TEACHER_TP=${TEACHER_TP}"
     exit 1
 fi
 
@@ -552,7 +727,6 @@ if [ "${CHECKPOINT_SHIP_ENABLED}" = "1" ]; then
     start_checkpoint_shipper
 fi
 
-TEACHER_IP="127.0.0.1"
 LOG_FILE="/tmp/sglang_$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 6).log"
 TEACHER_SGLANG_ARGS=(
     --model-path "${TEACHER_PATH}"
@@ -705,10 +879,14 @@ OPTIMIZER_ARGS=(
    --weight-decay "${WEIGHT_DECAY}"
    --adam-beta1 "${ADAM_BETA1}"
    --adam-beta2 "${ADAM_BETA2}"
-   --optimizer-cpu-offload
-   --overlap-cpu-optimizer-d2h-h2d
-   --use-precision-aware-optimizer
 )
+if [ "${USE_CPU_OPTIMIZER_OFFLOAD}" = "1" ]; then
+   OPTIMIZER_ARGS+=(
+      --optimizer-cpu-offload
+      --overlap-cpu-optimizer-d2h-h2d
+      --use-precision-aware-optimizer
+   )
+fi
 
 WANDB_ARGS=(
    --use-wandb
@@ -719,9 +897,9 @@ WANDB_ARGS=(
 )
 
 SGLANG_ARGS=(
-   --rollout-num-gpus-per-engine "${ACTOR_NUM_GPUS_PER_NODE}"
+   --rollout-num-gpus-per-engine "${ROLLOUT_NUM_GPUS_PER_ENGINE}"
    --sglang-mem-fraction-static "${SGLANG_MEM_FRACTION_STATIC}"
-   --sglang-expert-parallel-size "${ACTOR_NUM_GPUS_PER_NODE}"
+   --sglang-expert-parallel-size "${SGLANG_EXPERT_PARALLEL_SIZE}"
 )
 
 MISC_ARGS=(
@@ -729,16 +907,23 @@ MISC_ARGS=(
    --hidden-dropout 0.0
    --attention-softmax-in-fp32
    --attention-backend flash
-   --train-memory-margin-bytes $((256 * 1024 * 1024))
+   --train-memory-margin-bytes "${TRAIN_MEMORY_MARGIN_BYTES}"
 )
 
-export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 export CUDA_VISIBLE_DEVICES="${RAY_VISIBLE_GPUS}"
 ray stop --force 2>/dev/null || true
-ray start --head --node-ip-address "${MASTER_ADDR}" --num-gpus "${NUM_GPUS}" --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
+ray start --head --node-ip-address "${RAY_HEAD_IP}" --num-gpus "${RAY_NUM_GPUS}" --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
+
+RAY_JOB_ARGS=(
+   --actor-num-nodes "${ACTOR_NUM_NODES}"
+   --actor-num-gpus-per-node "${ACTOR_NUM_GPUS_PER_NODE}"
+)
+if [ "${USE_COLOCATE}" = "1" ]; then
+   RAY_JOB_ARGS+=(--colocate)
+fi
 
 set +e
-ray job submit --address="http://127.0.0.1:8265" \
+ray job submit --address="http://${RAY_HEAD_IP}:8265" \
    --runtime-env-json="{
      \"env_vars\": {
         \"PYTHONPATH\": \"${MEGATRON_PATH}\",
@@ -746,9 +931,7 @@ ray job submit --address="http://127.0.0.1:8265" \
      }
    }" \
    -- python3 "${REPO_DIR}/train.py" \
-   --actor-num-nodes 1 \
-   --actor-num-gpus-per-node "${ACTOR_NUM_GPUS_PER_NODE}" \
-   --colocate \
+   "${RAY_JOB_ARGS[@]}" \
    "${MODEL_ARGS[@]}" \
    "${CKPT_ARGS[@]}" \
    "${ROLLOUT_ARGS[@]}" \
