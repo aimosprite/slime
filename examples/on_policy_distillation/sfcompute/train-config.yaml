@@ -24,9 +24,12 @@ student_model: Qwen/Qwen3.5-35B-A3B
 student_model_args: qwen3.5-35B-A3B.sh
 
 # ── GPU allocation ────────────────────────────────────────────────────
-# Teacher server (sglang). TEACHER_TP is auto-derived from GPU count.
-# 122B-A10B needs a wider tensor-parallel shard than the old 32B teacher.
+# Teacher server (sglang).
+# 122B-A10B is ~97% expert params, so expert-parallel is the only way to shard
+# it across GPUs. TP=1/EP=4 gives ~64.6 GiB/rank on 4 H100s.
 teacher_visible_gpus: 4,5,6,7
+teacher_tp: 1
+teacher_ep: 4
 # Ray cluster: covers both student rollout and student training GPUs.
 ray_visible_gpus: 0,1,2,3
 # Student training (gradient updates). Must satisfy: actor_num_gpus_per_node + rollout_num_gpus <= len(ray_visible_gpus).
@@ -39,7 +42,9 @@ tensor_model_parallel_size: 2
 # Set to match tensor_model_parallel_size for large MoE models to avoid OOM.
 expert_tensor_parallel_size: 2
 # Memory fractions for the two sglang servers.
-teacher_mem_fraction: 0.75
+# With EP=4 the teacher model takes ~64.6 GiB/rank, leaving ~14.6 GiB.
+# mem_fraction_static is fraction of *remaining* memory for KV cache.
+teacher_mem_fraction: 0.80
 sglang_mem_fraction_static: 0.6
 
 # ── Training duration ─────────────────────────────────────────────────

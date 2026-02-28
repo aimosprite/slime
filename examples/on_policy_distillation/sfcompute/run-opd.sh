@@ -241,7 +241,9 @@ echo "=== Run started at $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
 echo "Log file: ${RUN_LOG}"
 MEGATRON_PATH="${MEGATRON_PATH:-${ROOT_DIR}/Megatron-LM}"
 TEACHER_VISIBLE_GPUS="${TEACHER_VISIBLE_GPUS:-${TEACHER_GPU:-4,5,6,7}}"
-TEACHER_TP="${TEACHER_TP:-$(awk -F',' '{print NF}' <<< "${TEACHER_VISIBLE_GPUS}")}"
+TEACHER_NUM_GPUS="$(awk -F',' '{print NF}' <<< "${TEACHER_VISIBLE_GPUS}")"
+TEACHER_EP="${TEACHER_EP:-1}"
+TEACHER_TP="${TEACHER_TP:-$(( TEACHER_NUM_GPUS / TEACHER_EP ))}"
 RAY_VISIBLE_GPUS="${RAY_VISIBLE_GPUS:-0,1,2,3}"
 ACTOR_NUM_GPUS_PER_NODE="${ACTOR_NUM_GPUS_PER_NODE:-2}"
 ROLLOUT_NUM_GPUS="${ROLLOUT_NUM_GPUS:-2}"
@@ -554,13 +556,19 @@ fi
 
 TEACHER_IP="127.0.0.1"
 LOG_FILE="/tmp/sglang_$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 6).log"
+TEACHER_SGLANG_ARGS=(
+    --model-path "${TEACHER_PATH}"
+    --host 0.0.0.0
+    --port "${TEACHER_PORT}"
+    --tp "${TEACHER_TP}"
+    --chunked-prefill-size 4096
+    --mem-fraction-static "${TEACHER_MEM_FRACTION}"
+)
+if [ "${TEACHER_EP}" -gt 1 ]; then
+    TEACHER_SGLANG_ARGS+=(--expert-parallel-size "${TEACHER_EP}")
+fi
 CUDA_VISIBLE_DEVICES="${TEACHER_VISIBLE_GPUS}" python3 -m sglang.launch_server \
-    --model-path "${TEACHER_PATH}" \
-    --host 0.0.0.0 \
-    --port "${TEACHER_PORT}" \
-    --tp "${TEACHER_TP}" \
-    --chunked-prefill-size 4096 \
-    --mem-fraction-static "${TEACHER_MEM_FRACTION}" \
+    "${TEACHER_SGLANG_ARGS[@]}" \
     > "${LOG_FILE}" 2>&1 &
 TEACHER_PID=$!
 
