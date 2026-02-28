@@ -38,6 +38,19 @@ class Qwen35MoEBridge(Qwen3NextBridge):
         ],
     }
 
+    # Qwen3.5 uses stacked (fused) expert weights: experts.gate_up_proj and
+    # experts.down_proj are single tensors of shape [num_experts, ...] instead
+    # of per-expert separate weights.
+    _MLP_MAPPING = {
+        **Qwen3NextBridge._MLP_MAPPING,
+        "mlp.experts.linear_fc1": [
+            "model.layers.{layer_number}.mlp.experts.gate_up_proj",
+        ],
+        "mlp.experts.linear_fc2": [
+            "model.layers.{layer_number}.mlp.experts.down_proj",
+        ],
+    }
+
     def _get_text_hf_config(self):
         # Qwen3.5 multimodal checkpoints store LM hyperparameters in text_config.
         return getattr(self.hf_config, "text_config", self.hf_config)
@@ -99,6 +112,18 @@ class Qwen35MoEBridge(Qwen3NextBridge):
             qkv, z, b, a = hf_weights
             # Megatron splits as [q, k, v, z, b, a] along dim 0
             return torch.cat([qkv, z, b, a], dim=0).contiguous()
+
+        # Stacked expert weights: extract the specific expert slice.
+        # Megatron names: mlp.experts.linear_fc1.weight{expert_id}
+        # HF provides a single stacked tensor [num_experts, ...].
+        if "mlp.experts.linear_fc1" in mcore_weights_name:
+            expert_id = int(mcore_weights_name.split("weight")[-1])
+            stacked = hf_weights[0]  # [num_experts, 2*moe_ffn_hidden, hidden]
+            return stacked[expert_id].contiguous()
+        if "mlp.experts.linear_fc2" in mcore_weights_name:
+            expert_id = int(mcore_weights_name.split("weight")[-1])
+            stacked = hf_weights[0]  # [num_experts, hidden, moe_ffn_hidden]
+            return stacked[expert_id].contiguous()
 
         return super()._weight_to_mcore_format(mcore_weights_name, hf_weights)
 
