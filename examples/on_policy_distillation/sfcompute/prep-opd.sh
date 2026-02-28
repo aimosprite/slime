@@ -156,6 +156,35 @@ hf_download() {
     fi
 }
 
+detect_convert_nproc_per_node() {
+    # Respect explicit override first.
+    if [ -n "${CONVERT_NPROC_PER_NODE:-}" ]; then
+        echo "${CONVERT_NPROC_PER_NODE}"
+        return 0
+    fi
+
+    # If CUDA_VISIBLE_DEVICES is set to a list, use its length.
+    if [ -n "${CUDA_VISIBLE_DEVICES:-}" ] && [ "${CUDA_VISIBLE_DEVICES}" != "all" ]; then
+        IFS=',' read -r -a cvd_arr <<< "${CUDA_VISIBLE_DEVICES}"
+        if [ "${#cvd_arr[@]}" -gt 0 ]; then
+            echo "${#cvd_arr[@]}"
+            return 0
+        fi
+    fi
+
+    # Fallback to nvidia-smi device count.
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        local gpu_count
+        gpu_count="$(nvidia-smi --query-gpu=index --format=csv,noheader | wc -l | tr -d '[:space:]')"
+        if [ -n "${gpu_count}" ] && [ "${gpu_count}" -gt 0 ]; then
+            echo "${gpu_count}"
+            return 0
+        fi
+    fi
+
+    echo "1"
+}
+
 echo "Running prep with:"
 echo "  REPO_DIR=${REPO_DIR}"
 echo "  ROOT_DIR=${ROOT_DIR}"
@@ -297,10 +326,21 @@ if [ ! -d "${STUDENT_TORCH_DIST}" ]; then
     echo "Converting ${STUDENT_SHORT} HF checkpoint to Megatron torch_dist..."
     # shellcheck disable=SC1091
     source "${REPO_DIR}/scripts/models/${STUDENT_MODEL_ARGS}"
-    PYTHONPATH="${MEGATRON_PATH}" python3 "${REPO_DIR}/tools/convert_hf_to_torch_dist.py" \
-        "${MODEL_ARGS[@]}" \
-        --hf-checkpoint "${STUDENT_PATH}" \
-        --save "${STUDENT_TORCH_DIST}"
+    CONVERT_NPROC="$(detect_convert_nproc_per_node)"
+    if [ "${CONVERT_NPROC}" -gt 1 ] && command -v torchrun >/dev/null 2>&1; then
+        echo "Using torchrun for conversion with nproc-per-node=${CONVERT_NPROC}."
+        PYTHONPATH="${MEGATRON_PATH}" torchrun --nproc-per-node "${CONVERT_NPROC}" \
+            "${REPO_DIR}/tools/convert_hf_to_torch_dist.py" \
+            "${MODEL_ARGS[@]}" \
+            --hf-checkpoint "${STUDENT_PATH}" \
+            --save "${STUDENT_TORCH_DIST}"
+    else
+        echo "Using single-process conversion (set CONVERT_NPROC_PER_NODE>1 to parallelize)."
+        PYTHONPATH="${MEGATRON_PATH}" python3 "${REPO_DIR}/tools/convert_hf_to_torch_dist.py" \
+            "${MODEL_ARGS[@]}" \
+            --hf-checkpoint "${STUDENT_PATH}" \
+            --save "${STUDENT_TORCH_DIST}"
+    fi
 else
     echo "${STUDENT_SHORT}_torch_dist already exists, skipping conversion."
 fi
