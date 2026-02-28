@@ -28,7 +28,7 @@ student_model_args: qwen3.5-35B-A3B.sh
 # 122B-A10B is ~97% expert params, so expert-parallel is the only way to shard
 # it across GPUs. TP=1/EP=4 gives ~64.6 GiB/rank on 4 H100s.
 teacher_visible_gpus: 4,5,6,7
-teacher_tp: 1
+teacher_tp: 4
 teacher_ep: 4
 # Ray cluster: covers both student rollout and student training GPUs.
 ray_visible_gpus: 0,1,2,3
@@ -42,9 +42,10 @@ tensor_model_parallel_size: 2
 # Set to match tensor_model_parallel_size for large MoE models to avoid OOM.
 expert_tensor_parallel_size: 2
 # Memory fractions for the two sglang servers.
-# With EP=4 the teacher model takes ~64.6 GiB/rank, leaving ~14.6 GiB.
-# mem_fraction_static is fraction of *remaining* memory for KV cache.
-teacher_mem_fraction: 0.80
+# With TP=4/EP=4 the teacher model takes ~59.6 GiB/rank.
+# mem_fraction_static is fraction of total GPU memory for model + KV cache.
+# 0.90 * 79.2 = 71.3 GiB total → ~11.7 GiB for KV cache after model.
+teacher_mem_fraction: 0.90
 sglang_mem_fraction_static: 0.6
 
 # ── Training duration ─────────────────────────────────────────────────
