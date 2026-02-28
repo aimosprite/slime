@@ -54,6 +54,34 @@ install_hf_cli_if_missing() {
     fi
 }
 
+ensure_transformers_qwen35_support() {
+    if python3 - <<'PY'
+try:
+    from transformers.models.auto.configuration_auto import CONFIG_MAPPING
+except Exception:
+    raise SystemExit(1)
+raise SystemExit(0 if "qwen3_5_moe" in CONFIG_MAPPING else 1)
+PY
+    then
+        echo "Transformers has qwen3_5_moe support."
+        return 0
+    fi
+
+    echo "Transformers is missing qwen3_5_moe. Installing a newer build..."
+    local transformers_src="${TRANSFORMERS_QWEN35_SOURCE:-git+https://github.com/huggingface/transformers.git}"
+    python3 -m pip install -U "${transformers_src}"
+
+    if ! python3 - <<'PY'
+from transformers.models.auto.configuration_auto import CONFIG_MAPPING
+raise SystemExit(0 if "qwen3_5_moe" in CONFIG_MAPPING else 1)
+PY
+    then
+        echo "Failed to install a Transformers version with qwen3_5_moe support."
+        echo "Set TRANSFORMERS_QWEN35_SOURCE to a compatible package and rerun."
+        exit 1
+    fi
+}
+
 hf_auth_whoami() {
     if [ "${HF_CLI}" = "hf" ]; then
         hf auth whoami
@@ -435,6 +463,7 @@ if [ -f "${REPO_DIR}/.env" ]; then
 fi
 
 install_hf_cli_if_missing
+ensure_transformers_qwen35_support
 HF_TOKEN="${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-${HUGGINGFACE_HUB_TOKEN:-}}}"
 if [ -n "${HF_TOKEN}" ]; then
     export HF_TOKEN
@@ -579,6 +608,8 @@ CKPT_ARGS=(
    --save-interval "${SAVE_INTERVAL}"
 )
 
+USE_TOOLS="${USE_TOOLS:-1}"
+
 ROLLOUT_ARGS=(
    --prompt-data "${TRAIN_DATA}"
    --input-key "${INPUT_KEY}"
@@ -592,12 +623,21 @@ ROLLOUT_ARGS=(
    --balance-data
 )
 
-RM_ARGS=(
-   --custom-generate-function-path examples.on_policy_distillation.generate_with_tools.generate
-   --custom-rm-path examples.on_policy_distillation.generate_with_tools.reward_func
-   --custom-reward-post-process-path examples.on_policy_distillation.generate_with_tools.post_process_rewards
-   --rm-url "http://${TEACHER_IP}:${TEACHER_PORT}/generate"
-)
+if [ "${USE_TOOLS}" = "1" ]; then
+   RM_ARGS=(
+      --custom-generate-function-path examples.on_policy_distillation.generate_with_tools.generate
+      --custom-rm-path examples.on_policy_distillation.generate_with_tools.reward_func
+      --custom-reward-post-process-path examples.on_policy_distillation.generate_with_tools.post_process_rewards
+      --rm-url "http://${TEACHER_IP}:${TEACHER_PORT}/generate"
+   )
+else
+   ROLLOUT_ARGS+=(--apply-chat-template)
+   RM_ARGS=(
+      --custom-rm-path examples.on_policy_distillation.on_policy_distillation.reward_func
+      --custom-reward-post-process-path examples.on_policy_distillation.on_policy_distillation.post_process_rewards
+      --rm-url "http://${TEACHER_IP}:${TEACHER_PORT}/generate"
+   )
+fi
 
 EVAL_ARGS=()
 if [ "${ENABLE_EVAL}" = "1" ]; then
@@ -662,6 +702,7 @@ WANDB_ARGS=(
    --wandb-project "${WANDB_PROJECT}"
    --wandb-group "${WANDB_GROUP}"
    --wandb-key "${WANDB_KEY}"
+   --wandb-config-file "${TRAIN_CONFIG}"
 )
 
 SGLANG_ARGS=(

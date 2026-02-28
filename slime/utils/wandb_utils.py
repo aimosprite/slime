@@ -1,5 +1,7 @@
 import logging
 import os
+import re
+import shutil
 from copy import deepcopy
 
 import wandb
@@ -73,10 +75,47 @@ def init_wandb_primary(args):
 
     wandb.init(**init_kwargs)
 
+    _save_config_file(args)
     _init_wandb_common()
 
     # Set wandb_run_id in args for easy access throughout the training process
     args.wandb_run_id = wandb.run.id
+
+
+def _parse_simple_yaml(path: str) -> dict[str, str]:
+    """Parse the simple key: value YAML format used by train-config.yaml."""
+    result = {}
+    with open(path) as f:
+        for line in f:
+            line = line.split("#")[0].strip()
+            m = re.match(r"^([a-z_]+):\s*(\S.*)", line)
+            if m:
+                result[m.group(1)] = m.group(2).strip()
+    return result
+
+
+def _save_config_file(args):
+    """Attach the train-config YAML to the W&B run as a file and merge its
+    key-value pairs into ``wandb.config["train_config"]``."""
+    config_path = getattr(args, "wandb_config_file", None)
+    if not config_path or not os.path.isfile(config_path):
+        return
+
+    try:
+        # Copy the YAML into the wandb run dir so it gets synced as a file.
+        run_dir = wandb.run.dir
+        dest = os.path.join(run_dir, os.path.basename(config_path))
+        shutil.copy2(config_path, dest)
+        wandb.save(dest, base_path=run_dir)
+
+        # Also merge parsed values into the wandb config for easy filtering.
+        parsed = _parse_simple_yaml(config_path)
+        if parsed:
+            wandb.config.update({"train_config": parsed}, allow_val_change=True)
+
+        logger.info(f"Saved config file to W&B run: {config_path}")
+    except Exception:
+        logger.warning(f"Failed to save config file to W&B: {config_path}", exc_info=True)
 
 
 def _compute_config_for_logging(args):
