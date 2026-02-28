@@ -21,7 +21,12 @@ for line in open(sys.argv[1]):
 PYEOF)"
 fi
 
-CONFIG_FILE="${CONFIG_FILE:-${SCRIPT_DIR}/config-8xh100.env}"
+DEFAULT_CONFIG_FILE="${SCRIPT_DIR}/config-16xh100.env"
+LEGACY_CONFIG_FILE="${SCRIPT_DIR}/config-8xh100.env"
+CONFIG_FILE="${CONFIG_FILE:-${DEFAULT_CONFIG_FILE}}"
+if [ ! -f "${CONFIG_FILE}" ] && [ -f "${LEGACY_CONFIG_FILE}" ]; then
+    CONFIG_FILE="${LEGACY_CONFIG_FILE}"
+fi
 if [ -f "${CONFIG_FILE}" ]; then
     set -a
     # shellcheck disable=SC1090
@@ -371,6 +376,24 @@ if [ -z "${ACTOR_NUM_NODES+x}" ] || [ -z "${ACTOR_NUM_NODES}" ]; then
         ACTOR_NUM_NODES=1
     fi
 fi
+if ! [[ "${ACTOR_NUM_NODES}" =~ ^[0-9]+$ ]] || [ "${ACTOR_NUM_NODES}" -le 0 ]; then
+    echo "ACTOR_NUM_NODES must be a positive integer; got '${ACTOR_NUM_NODES}'."
+    exit 1
+fi
+if ! [[ "${ACTOR_NUM_GPUS_PER_NODE}" =~ ^[0-9]+$ ]] || [ "${ACTOR_NUM_GPUS_PER_NODE}" -le 0 ]; then
+    echo "ACTOR_NUM_GPUS_PER_NODE must be a positive integer; got '${ACTOR_NUM_GPUS_PER_NODE}'."
+    exit 1
+fi
+if [ "${ACTOR_NUM_GPUS_PER_NODE}" -gt "${NUM_GPUS}" ]; then
+    echo "Invalid actor GPU layout:"
+    echo "  ACTOR_NUM_GPUS_PER_NODE=${ACTOR_NUM_GPUS_PER_NODE} exceeds NUM_GPUS=${NUM_GPUS} per worker node."
+    exit 1
+fi
+if [ "${CLUSTER_NUM_NODES}" -gt 1 ] && [ "${ACTOR_NUM_NODES}" -gt $((CLUSTER_NUM_NODES - 1)) ]; then
+    echo "Invalid actor node layout:"
+    echo "  ACTOR_NUM_NODES=${ACTOR_NUM_NODES} exceeds available worker nodes=$((CLUSTER_NUM_NODES - 1))."
+    exit 1
+fi
 DEFAULT_STUDENT_PARALLEL_SIZE=2
 if [ "${NUM_GPUS}" -lt 2 ]; then
     DEFAULT_STUDENT_PARALLEL_SIZE=1
@@ -414,11 +437,45 @@ WANDB_GROUP="${WANDB_GROUP:-${TEACHER_SHORT}-to-${STUDENT_SHORT}-opd}"
 
 RAY_NUM_GPUS="$(count_csv_items "${RAY_VISIBLE_GPUS}")"
 if [ -z "${USE_COLOCATE}" ]; then
-    if [ "${CLUSTER_NUM_NODES}" -gt 1 ] || [ "${RAY_NUM_GPUS}" -eq 0 ]; then
+    # For the default 2-node setup (teacher/head with no Ray GPUs + worker nodes),
+    # colocating actor and rollout on worker GPUs avoids over-reserving Ray resources.
+    if [ "${CLUSTER_NUM_NODES}" -gt 1 ] && [ "${RAY_NUM_GPUS}" -eq 0 ]; then
+        USE_COLOCATE=1
+    elif [ "${CLUSTER_NUM_NODES}" -gt 1 ] || [ "${RAY_NUM_GPUS}" -eq 0 ]; then
         USE_COLOCATE=0
     else
         USE_COLOCATE=1
     fi
+fi
+ROLLOUT_NUM_GPUS="${ROLLOUT_NUM_GPUS:-$((ACTOR_NUM_NODES * ACTOR_NUM_GPUS_PER_NODE))}"
+if ! [[ "${ROLLOUT_NUM_GPUS}" =~ ^[0-9]+$ ]] || [ "${ROLLOUT_NUM_GPUS}" -le 0 ]; then
+    echo "ROLLOUT_NUM_GPUS must be a positive integer; got '${ROLLOUT_NUM_GPUS}'."
+    exit 1
+fi
+if ! [[ "${ROLLOUT_NUM_GPUS_PER_ENGINE}" =~ ^[0-9]+$ ]] || [ "${ROLLOUT_NUM_GPUS_PER_ENGINE}" -le 0 ]; then
+    echo "ROLLOUT_NUM_GPUS_PER_ENGINE must be a positive integer; got '${ROLLOUT_NUM_GPUS_PER_ENGINE}'."
+    exit 1
+fi
+if [ $((ROLLOUT_NUM_GPUS % ROLLOUT_NUM_GPUS_PER_ENGINE)) -ne 0 ]; then
+    echo "Invalid rollout parallelism:"
+    echo "  ROLLOUT_NUM_GPUS=${ROLLOUT_NUM_GPUS} must be divisible by ROLLOUT_NUM_GPUS_PER_ENGINE=${ROLLOUT_NUM_GPUS_PER_ENGINE}"
+    exit 1
+fi
+AVAILABLE_CLUSTER_GPUS=$((ACTOR_NUM_NODES * NUM_GPUS))
+if [ "${USE_COLOCATE}" = "1" ]; then
+    REQUIRED_CLUSTER_GPUS=$((ACTOR_NUM_NODES * ACTOR_NUM_GPUS_PER_NODE))
+else
+    REQUIRED_CLUSTER_GPUS=$((ACTOR_NUM_NODES * ACTOR_NUM_GPUS_PER_NODE + ROLLOUT_NUM_GPUS))
+fi
+if [ "${REQUIRED_CLUSTER_GPUS}" -gt "${AVAILABLE_CLUSTER_GPUS}" ]; then
+    echo "Insufficient Ray worker GPUs for requested layout:"
+    echo "  available_gpus=${AVAILABLE_CLUSTER_GPUS} (ACTOR_NUM_NODES=${ACTOR_NUM_NODES} * NUM_GPUS=${NUM_GPUS})"
+    echo "  required_gpus=${REQUIRED_CLUSTER_GPUS} (USE_COLOCATE=${USE_COLOCATE}, ACTOR_NUM_GPUS_PER_NODE=${ACTOR_NUM_GPUS_PER_NODE}, ROLLOUT_NUM_GPUS=${ROLLOUT_NUM_GPUS})"
+    echo "Fix one of:"
+    echo "  - set USE_COLOCATE=1"
+    echo "  - reduce ACTOR_NUM_GPUS_PER_NODE or ROLLOUT_NUM_GPUS"
+    echo "  - increase worker nodes / NUM_GPUS"
+    exit 1
 fi
 if [ "${ACTOR_NUM_NODES}" -eq 1 ] && [ "${RAY_NUM_GPUS}" -gt 0 ] && [ "${ACTOR_NUM_GPUS_PER_NODE}" -gt "${RAY_NUM_GPUS}" ]; then
     echo "Invalid GPU layout:"
@@ -809,6 +866,7 @@ USE_TOOLS="${USE_TOOLS:-1}"
 ROLLOUT_ARGS=(
    --prompt-data "${TRAIN_DATA}"
    --input-key "${INPUT_KEY}"
+   --rollout-num-gpus "${ROLLOUT_NUM_GPUS}"
    --rollout-shuffle
    --num-rollout "${NUM_ROLLOUT}"
    --rollout-batch-size "${ROLLOUT_BATCH_SIZE}"
@@ -932,6 +990,7 @@ CUDA_VISIBLE_DEVICES="${RAY_VISIBLE_GPUS}" ray start --head --node-ip-address "$
 RAY_JOB_ARGS=(
    --actor-num-nodes "${ACTOR_NUM_NODES}"
    --actor-num-gpus-per-node "${ACTOR_NUM_GPUS_PER_NODE}"
+   --num-gpus-per-node "${NUM_GPUS}"
 )
 if [ "${USE_COLOCATE}" = "1" ]; then
    RAY_JOB_ARGS+=(--colocate)

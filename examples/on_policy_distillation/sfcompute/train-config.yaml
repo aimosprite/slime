@@ -1,6 +1,6 @@
-# Training hyperparameters for OPD on 8x H100.
+# Training hyperparameters for OPD on 16x H100 (2 nodes x 8 GPUs).
 # Edit this file to tune a run. Env vars always take precedence over values here.
-# Paths stay in config-8xh100.env; GPU layout has moved here.
+# Paths stay in config-16xh100.env; GPU layout has moved here.
 
 # ── Dataset ──────────────────────────────────────────────────────────
 # HuggingFace dataset ID. The prep script downloads & converts it to JSONL.

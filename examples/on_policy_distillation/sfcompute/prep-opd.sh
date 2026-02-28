@@ -19,7 +19,12 @@ for line in open(sys.argv[1]):
 PYEOF)"
 fi
 
-CONFIG_FILE="${CONFIG_FILE:-${SCRIPT_DIR}/config-8xh100.env}"
+DEFAULT_CONFIG_FILE="${SCRIPT_DIR}/config-16xh100.env"
+LEGACY_CONFIG_FILE="${SCRIPT_DIR}/config-8xh100.env"
+CONFIG_FILE="${CONFIG_FILE:-${DEFAULT_CONFIG_FILE}}"
+if [ ! -f "${CONFIG_FILE}" ] && [ -f "${LEGACY_CONFIG_FILE}" ]; then
+    CONFIG_FILE="${LEGACY_CONFIG_FILE}"
+fi
 if [ -f "${CONFIG_FILE}" ]; then
     set -a
     # shellcheck disable=SC1090

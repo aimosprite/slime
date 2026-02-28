@@ -84,7 +84,7 @@ bash examples/on_policy_distillation/sfcompute/setup.sh student <NODE_A_IP>
 | `docker-run.sh` | Docker wrapper for prep/train |
 | `prep-opd.sh` | Idempotent prep (dataset/model download + checkpoint conversion) |
 | `run-opd.sh` | Launches teacher + Ray OPD training (auto-runs prep if needed) |
-| `config-8xh100.env` | Configurable paths and GPU layout |
+| `config-16xh100.env` | Configurable paths and GPU layout (2 nodes x 8 H100) |
 | `train-config.yaml` | Training hyperparameters (save/eval cadence, optimizer, checkpoint shipping) |
 
 ## Hugging Face auth
