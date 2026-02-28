@@ -32,13 +32,16 @@ teacher_tp: 4
 teacher_ep: 4
 # Ray cluster: all 4 GPUs shared between training and rollout (colocate mode).
 ray_visible_gpus: 0,1,2,3
-# Student training uses all 4 GPUs (TP=4/ETP=4 → 8.67B params/rank → fits in 79 GiB).
+# Student training uses all 4 GPUs (TP=2, EMP=2, ETP=2 → ~8.5B params/rank).
 # Rollout shares the same GPUs via weight offloading (--colocate).
 actor_num_gpus_per_node: 4
 # Tensor parallel size for student training.
-tensor_model_parallel_size: 4
+# Max TP=2 because num_query_groups=2 must be divisible by TP.
+tensor_model_parallel_size: 2
+# Expert model parallel size (split expert count across EMP groups).
+expert_model_parallel_size: 2
 # Expert tensor parallel size (split expert weights across TP ranks).
-expert_tensor_parallel_size: 4
+expert_tensor_parallel_size: 2
 # Memory fractions for the two sglang servers.
 # With TP=4/EP=4 the teacher model takes ~59.6 GiB/rank.
 # mem_fraction_static is fraction of total GPU memory for model + KV cache.

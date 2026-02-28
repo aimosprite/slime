@@ -718,7 +718,7 @@ WANDB_ARGS=(
 SGLANG_ARGS=(
    --rollout-num-gpus-per-engine "${ACTOR_NUM_GPUS_PER_NODE}"
    --sglang-mem-fraction-static "${SGLANG_MEM_FRACTION_STATIC}"
-   --sglang-expert-parallel-size "${EXPERT_TENSOR_PARALLEL_SIZE:-1}"
+   --sglang-expert-parallel-size "${ACTOR_NUM_GPUS_PER_NODE}"
 )
 
 MISC_ARGS=(
