@@ -5,7 +5,7 @@ from mbridge.core import register_model
 from mbridge.models import Qwen2MoEBridge
 
 
-@register_model(["qwen3_5", "qwen3_5_moe"])
+@register_model("qwen3_5")
 class Qwen3_5Bridge(Qwen2MoEBridge):
     """
     Bridge for Qwen3.5 models (both dense and MoE variants).
