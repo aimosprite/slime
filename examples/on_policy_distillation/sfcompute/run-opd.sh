@@ -705,6 +705,9 @@ OPTIMIZER_ARGS=(
    --weight-decay "${WEIGHT_DECAY}"
    --adam-beta1 "${ADAM_BETA1}"
    --adam-beta2 "${ADAM_BETA2}"
+   --optimizer-cpu-offload
+   --overlap-cpu-optimizer-d2h-h2d
+   --use-precision-aware-optimizer
 )
 
 WANDB_ARGS=(
@@ -726,6 +729,7 @@ MISC_ARGS=(
    --hidden-dropout 0.0
    --attention-softmax-in-fp32
    --attention-backend flash
+   --train-memory-margin-bytes $((256 * 1024 * 1024))
 )
 
 export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
