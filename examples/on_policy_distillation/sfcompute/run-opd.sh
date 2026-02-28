@@ -285,6 +285,15 @@ build_gpu_csv_range() {
     done
     echo "${csv}"
 }
+first_csv_item() {
+    local csv="$1"
+    if [ -z "${csv// }" ]; then
+        echo ""
+        return 0
+    fi
+    IFS=',' read -r -a items <<< "${csv}"
+    echo "${items[0]}"
+}
 detect_primary_ip() {
     python3 - <<'PY'
 import socket
@@ -416,6 +425,13 @@ if [ "${ACTOR_NUM_NODES}" -eq 1 ] && [ "${RAY_NUM_GPUS}" -gt 0 ] && [ "${ACTOR_N
     echo "  RAY_VISIBLE_GPUS=${RAY_VISIBLE_GPUS} (${RAY_NUM_GPUS} GPUs)"
     echo "  ACTOR_NUM_GPUS_PER_NODE=${ACTOR_NUM_GPUS_PER_NODE}"
     exit 1
+fi
+RAY_DRIVER_VISIBLE_GPU="${RAY_DRIVER_VISIBLE_GPU:-$(first_csv_item "${RAY_VISIBLE_GPUS}")}"
+if [ -z "${RAY_DRIVER_VISIBLE_GPU}" ]; then
+    RAY_DRIVER_VISIBLE_GPU="$(first_csv_item "${TEACHER_VISIBLE_GPUS}")"
+fi
+if [ -z "${RAY_DRIVER_VISIBLE_GPU}" ]; then
+    RAY_DRIVER_VISIBLE_GPU="0"
 fi
 if [ "${TEACHER_NUM_GPUS}" -le 0 ]; then
     echo "Invalid teacher GPU layout: TEACHER_VISIBLE_GPUS='${TEACHER_VISIBLE_GPUS}'"
@@ -929,7 +945,7 @@ ray job submit --address="http://${RAY_HEAD_IP}:8265" \
         \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\"
      }
    }" \
-   -- python3 "${REPO_DIR}/train.py" \
+   -- env CUDA_VISIBLE_DEVICES="${RAY_DRIVER_VISIBLE_GPU}" python3 "${REPO_DIR}/train.py" \
    "${RAY_JOB_ARGS[@]}" \
    "${MODEL_ARGS[@]}" \
    "${CKPT_ARGS[@]}" \
