@@ -245,9 +245,8 @@ TEACHER_NUM_GPUS="$(awk -F',' '{print NF}' <<< "${TEACHER_VISIBLE_GPUS}")"
 TEACHER_EP="${TEACHER_EP:-1}"
 TEACHER_TP="${TEACHER_TP:-$(( TEACHER_NUM_GPUS / TEACHER_EP ))}"
 RAY_VISIBLE_GPUS="${RAY_VISIBLE_GPUS:-0,1,2,3}"
-ACTOR_NUM_GPUS_PER_NODE="${ACTOR_NUM_GPUS_PER_NODE:-2}"
-ROLLOUT_NUM_GPUS="${ROLLOUT_NUM_GPUS:-2}"
-TENSOR_MODEL_PARALLEL_SIZE="${TENSOR_MODEL_PARALLEL_SIZE:-2}"
+ACTOR_NUM_GPUS_PER_NODE="${ACTOR_NUM_GPUS_PER_NODE:-4}"
+TENSOR_MODEL_PARALLEL_SIZE="${TENSOR_MODEL_PARALLEL_SIZE:-4}"
 TEACHER_PORT="${TEACHER_PORT:-13141}"
 TEACHER_MEM_FRACTION="${TEACHER_MEM_FRACTION:-0.75}"
 SGLANG_MEM_FRACTION_STATIC="${SGLANG_MEM_FRACTION_STATIC:-0.6}"
@@ -257,11 +256,10 @@ WANDB_PROJECT="${WANDB_PROJECT:-slime-dev}"
 WANDB_GROUP="${WANDB_GROUP:-${TEACHER_SHORT}-to-${STUDENT_SHORT}-opd}"
 
 NUM_GPUS="$(awk -F',' '{print NF}' <<< "${RAY_VISIBLE_GPUS}")"
-if [ $((ACTOR_NUM_GPUS_PER_NODE + ROLLOUT_NUM_GPUS)) -gt "${NUM_GPUS}" ]; then
+if [ "${ACTOR_NUM_GPUS_PER_NODE}" -gt "${NUM_GPUS}" ]; then
     echo "Invalid GPU layout:"
     echo "  RAY_VISIBLE_GPUS=${RAY_VISIBLE_GPUS} (${NUM_GPUS} GPUs)"
     echo "  ACTOR_NUM_GPUS_PER_NODE=${ACTOR_NUM_GPUS_PER_NODE}"
-    echo "  ROLLOUT_NUM_GPUS=${ROLLOUT_NUM_GPUS}"
     exit 1
 fi
 
@@ -718,8 +716,9 @@ WANDB_ARGS=(
 )
 
 SGLANG_ARGS=(
-   --rollout-num-gpus-per-engine 1
+   --rollout-num-gpus-per-engine "${ACTOR_NUM_GPUS_PER_NODE}"
    --sglang-mem-fraction-static "${SGLANG_MEM_FRACTION_STATIC}"
+   --sglang-expert-parallel-size "${EXPERT_TENSOR_PARALLEL_SIZE:-1}"
 )
 
 MISC_ARGS=(
@@ -745,7 +744,7 @@ ray job submit --address="http://127.0.0.1:8265" \
    -- python3 "${REPO_DIR}/train.py" \
    --actor-num-nodes 1 \
    --actor-num-gpus-per-node "${ACTOR_NUM_GPUS_PER_NODE}" \
-   --rollout-num-gpus "${ROLLOUT_NUM_GPUS}" \
+   --colocate \
    "${MODEL_ARGS[@]}" \
    "${CKPT_ARGS[@]}" \
    "${ROLLOUT_ARGS[@]}" \

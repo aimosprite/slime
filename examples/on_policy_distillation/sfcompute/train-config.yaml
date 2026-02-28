@@ -30,17 +30,15 @@ student_model_args: qwen3.5-35B-A3B.sh
 teacher_visible_gpus: 4,5,6,7
 teacher_tp: 4
 teacher_ep: 4
-# Ray cluster: covers both student rollout and student training GPUs.
+# Ray cluster: all 4 GPUs shared between training and rollout (colocate mode).
 ray_visible_gpus: 0,1,2,3
-# Student training (gradient updates). Must satisfy: actor_num_gpus_per_node + rollout_num_gpus <= len(ray_visible_gpus).
-actor_num_gpus_per_node: 2
-# Student rollout engine (sglang within Ray).
-rollout_num_gpus: 2
+# Student training uses all 4 GPUs (TP=4/ETP=4 → 8.67B params/rank → fits in 79 GiB).
+# Rollout shares the same GPUs via weight offloading (--colocate).
+actor_num_gpus_per_node: 4
 # Tensor parallel size for student training.
-tensor_model_parallel_size: 2
+tensor_model_parallel_size: 4
 # Expert tensor parallel size (split expert weights across TP ranks).
-# Set to match tensor_model_parallel_size for large MoE models to avoid OOM.
-expert_tensor_parallel_size: 2
+expert_tensor_parallel_size: 4
 # Memory fractions for the two sglang servers.
 # With TP=4/EP=4 the teacher model takes ~59.6 GiB/rank.
 # mem_fraction_static is fraction of total GPU memory for model + KV cache.
