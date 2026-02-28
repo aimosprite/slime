@@ -910,9 +910,8 @@ MISC_ARGS=(
    --train-memory-margin-bytes "${TRAIN_MEMORY_MARGIN_BYTES}"
 )
 
-export CUDA_VISIBLE_DEVICES="${RAY_VISIBLE_GPUS}"
 ray stop --force 2>/dev/null || true
-ray start --head --node-ip-address "${RAY_HEAD_IP}" --num-gpus "${RAY_NUM_GPUS}" --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
+CUDA_VISIBLE_DEVICES="${RAY_VISIBLE_GPUS}" ray start --head --node-ip-address "${RAY_HEAD_IP}" --num-gpus "${RAY_NUM_GPUS}" --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
 
 RAY_JOB_ARGS=(
    --actor-num-nodes "${ACTOR_NUM_NODES}"
