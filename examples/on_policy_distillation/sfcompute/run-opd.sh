@@ -672,6 +672,7 @@ EVALEOF
 fi
 
 PERF_ARGS=(
+   --bf16
    --tensor-model-parallel-size "${TENSOR_MODEL_PARALLEL_SIZE}"
    --sequence-parallel
    --pipeline-model-parallel-size 1
