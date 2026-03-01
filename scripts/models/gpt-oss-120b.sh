@@ -19,6 +19,7 @@ MODEL_ARGS=(
     --group-query-attention
     --num-layers $N_MOE_LAYERS
     --hidden-size 2880
+    --ffn-hidden-size 2880                # equals intermediate_size; required for hf_validate_args
     --num-attention-heads 64
     --num-query-groups 8
     --kv-channels 64
