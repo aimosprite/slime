@@ -3,10 +3,8 @@ HIGH LEVEL PLAN RIGHT NOW:
 - distill Qwen3-32B (we call it 32b in the future) into Qwen3-8b (we call it 8b in the future) (randomly initialize all the embeddings of the 8b model)
 - randomly initialize the tokens of qwen3-8b. this experiment is to check can the model recover / learn the embeddings,
  how long it takes, and experiment with different initialization techniques. 
-- generate a bunch of rollouts of the teacher. first experiment with math data only. 
 
-- they should both fit into the 8 gpu node. train qwen 8b using megatron's sft. 
-- randomly sample data from the openmathinstruct 32b model given 
+- they should both fit into the 8 gpu node. train qwen 8b using slime's sft and the script we'll provide.  
 
 - use SLIME for sft training. 
 - adopt tricks from rohin-experiments.md. but only what's relevant -- it was doing opd on two nodes, we are doing sft on one node
