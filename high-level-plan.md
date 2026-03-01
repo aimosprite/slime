@@ -18,6 +18,7 @@ so
 - create a new hub in hf named "qwen3-32b-to-8b-embedding-surgery"
 - checkpoint the 8b model there every 10 minutes with evals
 - and everything else that the script above does. look at the params used as well. before you run, check everything with me
+- randomly initialize the embedding weights, and the last layer (so emb -> token should also be random)
 
 
 sft dataset:
@@ -29,4 +30,7 @@ again, make a plan. but don't forget:
 - wandb for evals
 - we don't touch 32B for now. just SFT 8b on that sft dataset
 
-
+IMPORTANT: 
+- read CLAUDE.md, gimran-CLAUDE.md and MISTAKES.md
+- when mistake happens, fix them. 
+- USE EXISTING SCRIPTS. like sfacquire.sh, gimran-setup.sh

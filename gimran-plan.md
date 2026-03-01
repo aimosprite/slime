@@ -23,6 +23,9 @@ questions:
 - what happens if you only train it on math? 
 - tool use bench? instruction following bench? 
 - should i use Qwen3-30B-A3B or 32b? 30B should be fine 
+- make 30B rollouts
+- compare math only SFT vs general SFT, and then math 
+- 
 
 other notes: 
 - what are the quantization levels? 
