@@ -35,7 +35,7 @@ _ROLE_MAP = {"human": "user", "gpt": "assistant", "assistant": "assistant"}
 
 def _conv_to_messages(row: dict) -> list[dict] | None:
     """Convert one AM row to a list of role/content message dicts."""
-    system = row.get("system", "").strip()
+    system = (row.get("system") or "").strip()
     convs = row.get("conversations", [])
 
     messages = []
