@@ -19,9 +19,11 @@ REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # ======================== LOAD CONFIG ========================
 # YAML keys become uppercase env vars. Already-set env vars take precedence.
+# Uses a temp file to avoid bash heredoc-inside-$() parsing issues.
 TRAIN_CONFIG="${TRAIN_CONFIG:-${REPO_DIR}/configs/sft-qwen3-8b-embedding-surgery.yaml}"
 if [ -f "${TRAIN_CONFIG}" ]; then
-    eval "$(python3 - "${TRAIN_CONFIG}" <<'PYEOF'
+    _cfg_py="$(mktemp /tmp/slime_cfg_XXXXXX.py)"
+    cat > "${_cfg_py}" << 'PYEOF'
 import sys, re, os
 for line in open(sys.argv[1]):
     line = line.split('#')[0].strip()
@@ -30,7 +32,9 @@ for line in open(sys.argv[1]):
         k, v = m.group(1).upper(), m.group(2).strip()
         if k not in os.environ:
             print(f"export {k}='{v}'")
-PYEOF)"
+PYEOF
+    eval "$(python3 "${_cfg_py}" "${TRAIN_CONFIG}")"
+    rm -f "${_cfg_py}"
     echo "Loaded config: ${TRAIN_CONFIG}"
 else
     echo "WARNING: config not found at ${TRAIN_CONFIG}, using script defaults"
@@ -182,7 +186,8 @@ if [ "${DO_PREP}" = "1" ]; then
             --context-parallel-size        1 \
             --expert-model-parallel-size   1 \
             --expert-tensor-parallel-size  1 \
-            --untie-embeddings-and-output-weights
+            --untie-embeddings-and-output-weights \
+            --no-gradient-accumulation-fusion
     else
         echo "--- Megatron checkpoint already exists at ${MEGATRON_REF_DIR}, skipping ---"
     fi
@@ -430,6 +435,7 @@ MISC_ARGS=(
     --accumulate-allreduce-grads-in-fp32
     --attention-softmax-in-fp32
     --attention-backend             "${ATTENTION_BACKEND}"
+    --no-gradient-accumulation-fusion
 )
 
 # ======================== LAUNCH ========================

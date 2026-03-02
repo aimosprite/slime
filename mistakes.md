@@ -144,6 +144,85 @@ pure-PyTorch fallback until the proper libraries are installed.
 **To install properly:** Run `setup-env.sh` (requires uv, CUDA toolkit, ~30 min compile)
 or: `pip install transformer_engine[pytorch]==2.10.0 --no-build-isolation`
 
+## 14. Apex CUDA extension missing — disable gradient_accumulation_fusion
+
+**Date:** 2026-03-02
+
+**What happened:** Megatron defaults `gradient_accumulation_fusion=True` which
+requires Apex's `fused_weight_gradient_mlp_cuda` CUDA extension. Without Apex,
+all ranks crash: `RuntimeError: ColumnParallelLinear ... fused_weight_gradient_mlp_cuda
+module is not found`.
+
+**Fix:** Add `--no-gradient-accumulation-fusion` to both the conversion torchrun
+call AND the training MISC_ARGS. This disables the fused kernel and falls back to
+PyTorch native grad accumulation (slightly slower but functionally identical).
+
+## 13. numpy 2.x installed — Megatron requires numpy<2
+
+**Date:** 2026-03-02
+
+**What happened:** All 8 torchrun ranks hit `AssertionError: Megatron does not support numpy 2.x`
+immediately after launching.
+
+**Fix:** `sudo pip3 install "numpy<2"` — downgrades to 1.26.4.
+
+## 12. slime and mbridge packages not installed — conversion fails
+
+**Date:** 2026-03-02
+
+**What happened:** `convert_hf_to_torch_dist.py` does `import slime_plugins.mbridge`
+at module level. Neither `slime` (the repo itself) nor `mbridge` were pip-installed,
+so all 8 torchrun workers crashed immediately.
+
+**Fix:**
+  ```bash
+  sudo pip3 install -e /root/slime/        # installs slime + deps including ray, wandb
+  sudo pip3 install mbridge                # weight-conversion bridge library
+  ```
+
+**Note:** The git-pinned mbridge install from setup-env.sh fails (project name mismatch).
+PyPI version 0.15.1 works fine.
+
+## 15. mbridge Qwen3Bridge fails with --transformer-impl local
+
+**Date:** 2026-03-02
+
+**What happened:** `convert_hf_to_torch_dist.py` crashed with
+`NotImplementedError: Unsupported parameter name: decoder.layers.35.input_layernorm.weight`.
+PyPI `mbridge` 0.15.1's `Qwen3Bridge` only handles TransformerEngine-fused naming:
+  - TE: `self_attention.linear_qkv.layer_norm_weight` → `input_layernorm`
+  - TE: `mlp.linear_fc1.layer_norm_weight` → `post_attention_layernorm`
+With `--transformer-impl local`, Megatron stores these as STANDALONE modules:
+  - Local: `decoder.layers.X.input_layernorm.weight`
+  - Local: `decoder.layers.X.pre_mlp_layernorm.weight`
+The standalone names fall through to `_weight_name_mapping_other` which has an
+empty `_OTHER_MAPPING` for Qwen2/3, causing the NotImplementedError.
+
+**Fix:** Created `slime_plugins/mbridge/qwen3.py` that extends `Qwen3Bridge` and
+overrides `_weight_name_mapping_mcore_to_hf` to intercept standalone layernorm names:
+  - `decoder.layers.X.input_layernorm.weight` → `model.layers.X.input_layernorm.weight`
+  - `decoder.layers.X.pre_mlp_layernorm.weight` → `model.layers.X.post_attention_layernorm.weight`
+Also registered as `@register_model("qwen3")` to override the PyPI entry.
+Added to `slime_plugins/mbridge/__init__.py`.
+
+## 16. AM-Qwen3-Distilled is JSONL, not parquet — datasets schema cast error
+
+**Date:** 2026-03-02
+
+**What happened:** `prep_am_dataset.py` called `load_dataset("a-m-team/AM-Qwen3-Distilled")`
+which crashed with `TypeError: Couldn't cast array of type string to null`. The dataset
+stores data as JSONL files (`code.jsonl`, `if.jsonl`, `math.jsonl`, `multiturn.jsonl`,
+`other.jsonl`, `science.jsonl`), not parquet. The `datasets` library tries to cast
+inconsistent schema across shards (some `info` sub-fields are `null` in some shards,
+`string` in others). Also the conversation format uses `from`/`value` keys (not
+`role`/`content`), with a separate `system` field.
+
+**Fix:** Rewrote `prep_am_dataset.py` to:
+1. Download the 6 JSONL files directly via `hf_hub_download`
+2. Stream and convert: `from: human` → `role: user`, `from: assistant` → `role: assistant`
+3. Prepend system message from the `system` field
+4. Write to parquet in batches via pyarrow
+
 ## 11. Models downloaded to /root/ instead of models/ folder
 
 **Date:** 2026-03-02
