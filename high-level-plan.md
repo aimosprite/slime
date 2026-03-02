@@ -9,15 +9,18 @@ HIGH LEVEL PLAN RIGHT NOW:
 - use SLIME for sft training. 
 - adopt tricks from rohin-experiments.md. but only what's relevant -- it was doing opd on two nodes, we are doing sft on one node
 
-set up: 
-- look at scripts/run-qwen3-4B-base-sft.sh. 
-so
-- log in to hugging face.
-- create a new hub in hf named "qwen3-32b-to-8b-embedding-surgery"
-- checkpoint the 8b model there every 10 minutes with evals
-- and everything else that the script above does. look at the params used as well. before you run, check everything with me
-- randomly initialize the embedding weights, and the last layer (so emb -> token should also be random)
+MAIN:
+run DO_PREP=1 bash scripts/sft-qwen3-8b-AM-embedding-swap.sh. fix mistakes. 
 
+so
+- get me an SFT-ed version of the model. i trust you.
+- log in to hugging face. checkpoint the model say, every 30 minutes. overwrite the latest checkpoints. 
+- create a new hub in hf named "qwen3-32b-to-8b-embedding-surgery", or check if it exists
+- and everything else that the script above does. look at the params used as well. 
+- randomly initialize the embedding weights, and the last layer (so emb -> token should also be random)
+- log useful stuff to WANDB. log a lot. 
+
+TOKENS ARE AT .ENV
 
 sft dataset:
 - https://huggingface.co/datasets/a-m-team/AM-Qwen3-Distilled
@@ -31,4 +34,6 @@ again, make a plan. but don't forget:
 IMPORTANT: 
 - read CLAUDE.md, gimran-CLAUDE.md and MISTAKES.md
 - when mistake happens, fix them. 
-- USE EXISTING SCRIPTS. like sfacquire.sh, gimran-setup.sh
+- USE EXISTING SCRIPTS, BUT CHECK THEIR CORRECTNESS. like sfacquire.sh, gimran-setup.sh, ...
+- whenever you update something, push it to github. don't push model weights or other heavy stuff
+- maintain MISTAKES.md, read from there to fix the mistakes you had. 

@@ -37,7 +37,7 @@ MODEL_DIR="${POOL_DIR}/${MODEL_NAME}"
 RANDOM_EMB_DIR="${POOL_DIR}/${MODEL_NAME}-random-emb"
 MEGATRON_REF_DIR="${POOL_DIR}/${MODEL_NAME}-random-emb_torch_dist"
 SLIME_DIR="${POOL_DIR}/${MODEL_NAME}-random-emb_slime"
-DATASET_PATH="${POOL_DIR}/am-qwen3-distilled.parquet"
+DATASET_PATH="${DATASET_PATH:-${POOL_DIR}/am-qwen3-distilled.parquet}"
 
 INIT_STD="${INIT_STD:-0.02}"
 INIT_SEED="${INIT_SEED:-42}"
@@ -93,6 +93,12 @@ CHECKPOINT_HF_CREATE_REPO="${CHECKPOINT_HF_CREATE_REPO:-1}"
 WANDB_PROJECT="${WANDB_PROJECT:-slime-dev}"
 WANDB_GROUP="${WANDB_GROUP:-qwen3-8b-embedding-surgery}"
 WANDB_KEY="${WANDB_KEY:-${WANDB_API_KEY:-}}"
+USE_WANDB="${USE_WANDB:-1}"
+# Validate wandb key length (must be 40+ chars)
+if [ -n "${WANDB_KEY}" ] && [ "${#WANDB_KEY}" -lt 40 ]; then
+    echo "WARNING: WANDB_KEY is only ${#WANDB_KEY} chars (need 40+). WandB logging disabled."
+    USE_WANDB=0
+fi
 
 # ======================== PERSISTENT LOG ========================
 mkdir -p "$(dirname "${RUN_LOG}")"
@@ -124,8 +130,8 @@ else
     echo "All artifacts present."
 
     if [ -z "${WANDB_KEY}" ]; then
-        echo "ERROR: WANDB_KEY (or WANDB_API_KEY) not set. Add it to .env."
-        exit 1
+        echo "WARNING: WANDB_KEY (or WANDB_API_KEY) not set. WandB logging will be disabled."
+        USE_WANDB=0
     fi
     if [ ! -d "${MEGATRON_PATH}" ]; then
         echo "ERROR: Megatron-LM not found at ${MEGATRON_PATH}."
@@ -202,7 +208,6 @@ FREEZE_ARGS=(
 PERF_ARGS=(
     --bf16
     --tensor-model-parallel-size   "${TENSOR_MODEL_PARALLEL_SIZE}"
-    --sequence-parallel
     --pipeline-model-parallel-size "${PIPELINE_MODEL_PARALLEL_SIZE}"
     --context-parallel-size        "${CONTEXT_PARALLEL_SIZE}"
     --expert-model-parallel-size   "${EXPERT_MODEL_PARALLEL_SIZE}"
@@ -227,12 +232,17 @@ OPTIMIZER_ARGS=(
     --adam-beta2          "${ADAM_BETA2}"
 )
 
-WANDB_ARGS=(
-    --use-wandb
-    --wandb-project "${WANDB_PROJECT}"
-    --wandb-group   "${WANDB_GROUP}"
-    --wandb-key     "${WANDB_KEY}"
-)
+WANDB_ARGS=()
+if [ "${USE_WANDB}" = "1" ]; then
+    WANDB_ARGS=(
+        --use-wandb
+        --wandb-project "${WANDB_PROJECT}"
+        --wandb-group   "${WANDB_GROUP}"
+        --wandb-key     "${WANDB_KEY}"
+    )
+else
+    echo "=== WandB DISABLED (invalid or missing key) ==="
+fi
 
 MISC_ARGS=(
     --attention-dropout             "${ATTENTION_DROPOUT}"
@@ -248,6 +258,7 @@ MISC_ARGS=(
 
 export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 export no_proxy="127.0.0.1,${MASTER_ADDR}"
+export RAY_memory_usage_threshold="${RAY_memory_usage_threshold:-0.99}"
 ray start --head \
     --node-ip-address "${MASTER_ADDR}" \
     --num-gpus "${ACTOR_NUM_GPUS_PER_NODE}" \

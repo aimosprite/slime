@@ -19,7 +19,7 @@ train_params: embedding output_layer # Megatron param patterns to train; everyth
 
 input_key:           messages  # parquet column holding list of {role, content} dicts
 loss_mask_type:      qwen3     # loss mask template: qwen | qwen3 | distill_qwen — must match model family
-apply_chat_template: 1         # treat input as OpenAI message format; apply HF tokenizer chat template
+apply_chat_template: 0         # 0: messages stay as list[dict] for qwen3 loss mask generator (it applies chat template internally)
 tool_key:            tools     # metadata key for tool definitions (AM dataset includes tool-call examples)
 rollout_shuffle:     1         # shuffle dataset at each epoch
 rollout_seed:        42        # RNG seed for data shuffle / sampling
@@ -29,7 +29,7 @@ rollout_max_context_len: 8192  # filter / truncate examples longer than this (pr
 
 num_epoch:          1    # full passes over AM-Qwen3-Distilled; 1 epoch ≈ 14,750 steps at gbs=128
 global_batch_size:  128  # total samples per gradient update across all GPUs
-rollout_batch_size: 128  # samples fetched per data-loader call; must be >= global_batch_size
+rollout_batch_size: 256  # samples fetched per data-loader call; overfetch to compensate for seq_length filtering
 micro_batch_size:   1    # per-GPU samples per forward pass (dynamic batching disabled: packing requires TE)
 save_interval:      100  # checkpoint every N gradient steps; old checkpoints overwritten after HF upload
 
@@ -48,7 +48,7 @@ clip_grad:          1.0    # gradient norm clipping
 adam_beta1:         0.9    # first moment (momentum)
 adam_beta2:         0.95   # second moment; lower than 0.999 for faster adaptation on random-init params
 
-tensor_model_parallel_size:  1  # TP=1 (data-parallel only); 8B fits on one 80GB GPU
+tensor_model_parallel_size:  2  # TP=2 (splits logits across 2 GPUs, avoids OOM on long seqs); DP=4
 pipeline_model_parallel_size: 1  # PP=1
 context_parallel_size:       1  # CP=1; not useful unless sequences > 32K
 expert_model_parallel_size:  1  # EP=1; Qwen3-8B is dense (no MoE)

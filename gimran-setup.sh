@@ -3,6 +3,11 @@ set -e
 
 # Always run from repo root (where this script lives)
 cd "$(dirname "$0")"
+SLIME_DIR="$(pwd)"
+ROOT_DIR="$(dirname "$SLIME_DIR")"
+
+export MEGATRON_COMMIT="3714d81d418c9f1bca4594fc35f9e8289f652862"
+export SGLANG_COMMIT="24c91001cf99ba642be791e099d358f4dfe955f5"
 
 # Suppress interactive prompts from apt (needrestart, daemon restart dialogs)
 export DEBIAN_FRONTEND=noninteractive
@@ -96,14 +101,6 @@ else
     echo "installed hf"
 fi
 
-echo "=== installing sglang ==="
-if python3 -c "import sglang" &>/dev/null; then
-    echo "sglang already installed"
-else
-    uv pip install --system "sglang[all]" --find-links https://flashinfer.ai/whl/cu124/torch2.5/flashinfer-python
-    echo "installed sglang"
-fi
-
 echo "=== upgrading CuDNN (fix PyTorch 2.9.1 compatibility) ==="
 uv pip install --system "nvidia-cudnn-cu12==9.16.0.29"
 echo "installed nvidia-cudnn-cu12==9.16.0.29"
@@ -157,16 +154,68 @@ else
 fi
 
 echo "=== cloning slime ==="
-if [ ! -d "slime" ]; then
-    git clone https://github.com/aimosprite/slime.git slime
+if [ ! -d "${ROOT_DIR}/slime" ]; then
+    git clone https://github.com/aimosprite/slime.git "${ROOT_DIR}/slime"
 else
     echo "slime/ already exists, skipping"
 fi
 
+echo "=== installing Megatron-LM (pinned commit + patch) ==="
+if [ ! -d "${ROOT_DIR}/Megatron-LM" ]; then
+    git clone https://github.com/NVIDIA/Megatron-LM.git --recursive "${ROOT_DIR}/Megatron-LM"
+fi
+cd "${ROOT_DIR}/Megatron-LM"
+git checkout ${MEGATRON_COMMIT}
+git checkout -- .
+git apply "${SLIME_DIR}/docker/patch/latest/megatron.patch"
+uv pip install --system -e .
+cd "${SLIME_DIR}"
+
+echo "=== installing sglang (pinned commit + patch) ==="
+if [ ! -d "${ROOT_DIR}/sglang" ]; then
+    git clone https://github.com/sgl-project/sglang.git "${ROOT_DIR}/sglang"
+fi
+cd "${ROOT_DIR}/sglang"
+git checkout ${SGLANG_COMMIT}
+git checkout -- .
+git apply "${SLIME_DIR}/docker/patch/latest/sglang.patch" || true
+uv pip install --system -e "python[all]"
+cd "${SLIME_DIR}"
+
+echo "=== installing PyTorch ==="
+python3 -c "import torch; print(torch.__version__)" 2>/dev/null || \
+    uv pip install --system torch==2.9.1 torchvision==0.24.1 torchaudio==2.9.1 \
+        --index-url https://download.pytorch.org/whl/cu129
+
+echo "=== installing flash-attn ==="
+MAX_JOBS=2 uv pip install --system flash-attn==2.7.4.post1 --no-build-isolation
+
+echo "=== installing ML training stack ==="
+uv pip install --system \
+    "mbridge @ git+https://github.com/ISEEKYAN/mbridge.git@89eb10887887bc74853f89a4de258c0702932a1c" \
+    --no-deps
+uv pip install --system --no-build-isolation "transformer_engine[pytorch]==2.10.0"
+NVCC_APPEND_FLAGS="--threads 4" \
+    uv pip install --system --no-build-isolation \
+    --config-settings "--build-option=--cpp_ext --cuda_ext --parallel 8" \
+    "apex @ git+https://github.com/NVIDIA/apex.git@10417aceddd7d5d05d7cbf7b0fc2daad1105f8b4"
+uv pip install --system \
+    "git+https://github.com/fzyzcjy/torch_memory_saver.git@dc6876905830430b5054325fa4211ff302169c6b" \
+    --force-reinstall
+uv pip install --system "git+https://github.com/fzyzcjy/Megatron-Bridge.git@dev_rl" --no-build-isolation
+uv pip install --system "nvidia-modelopt[torch]>=0.37.0" --no-build-isolation
+uv pip install --system flash-linear-attention==0.4.0
+uv pip install --system einops
+uv pip install --system "numpy<2"
+uv pip install --system cmake ninja
+
+echo "=== installing slime ==="
+uv pip install --system -e .
+
 echo "=== downloading models ==="
 mkdir -p models
 
-MODELS_FILE="$(dirname "$0")/models.txt"
+MODELS_FILE="${SLIME_DIR}/models.txt"
 if [ ! -f "$MODELS_FILE" ]; then
     echo "FATAL: models.txt not found at $MODELS_FILE" >&2
     exit 1

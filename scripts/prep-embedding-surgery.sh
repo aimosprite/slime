@@ -122,8 +122,9 @@ echo "All artifacts present."
 # ======================== ENV CHECKS ========================
 WANDB_KEY="${WANDB_KEY:-${WANDB_API_KEY:-}}"
 if [ -z "${WANDB_KEY}" ]; then
-    echo "ERROR: WANDB_KEY (or WANDB_API_KEY) not set. Add it to .env."
-    exit 1
+    echo "WARNING: WANDB_KEY (or WANDB_API_KEY) not set. WandB logging will be disabled at train time."
+elif [ "${#WANDB_KEY}" -lt 40 ]; then
+    echo "WARNING: WANDB_KEY is only ${#WANDB_KEY} chars (need 40+). WandB logging will be disabled at train time."
 fi
 if [ ! -d "${MEGATRON_PATH}" ]; then
     echo "ERROR: Megatron-LM not found at ${MEGATRON_PATH}."

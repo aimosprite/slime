@@ -40,6 +40,8 @@ def generate_rollout(args, rollout_id, data_buffer, evaluation=False):
         MASK_GENERATOR = MultiTurnLossMaskGenerator(TOKENIZER, tokenizer_type=args.loss_mask_type)
 
     samples = data_buffer.get_samples(args.rollout_batch_size)
+    max_len = args.seq_length
+    filtered = []
 
     for i, sample in enumerate(samples):
         (sample,) = sample
@@ -48,6 +50,10 @@ def generate_rollout(args, rollout_id, data_buffer, evaluation=False):
 
         token_ids, loss_mask = MASK_GENERATOR.get_loss_mask(messages, tools=tools)
 
+        # Filter out sequences that exceed seq_length
+        if len(token_ids) > max_len:
+            continue
+
         response_length = MASK_GENERATOR.get_response_lengths([loss_mask])[0]
 
         sample.tokens = token_ids
@@ -55,10 +61,13 @@ def generate_rollout(args, rollout_id, data_buffer, evaluation=False):
         sample.reward = 0
         sample.loss_mask = loss_mask[-response_length:]
 
-        if i == 0 and not SAMPLE_PRINTED:
+        if not SAMPLE_PRINTED:
             logger.info(
                 f"sft_rollout::generate_rollout example data: {sample=} (raw){messages=} (raw){token_ids=} (raw){loss_mask=} {response_length=}"
             )
             SAMPLE_PRINTED = True
 
-    return samples
+        filtered.append(sample)
+
+    logger.info(f"sft_rollout: kept {len(filtered)}/{len(samples)} samples (filtered {len(samples)-len(filtered)} > {max_len} tokens)")
+    return filtered
