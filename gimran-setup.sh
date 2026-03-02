@@ -43,6 +43,8 @@ mkdir -p /home/aimo/.local/bin
 chown -R aimo:aimo /home/aimo/
 
 # Make repo accessible to aimo user
+# /root is 700 by default — aimo needs +x to traverse into /root/slime
+chmod o+x /root
 REPO_DIR="$(pwd)"
 chgrp -R aimo "$REPO_DIR"
 chmod -R g+rwX "$REPO_DIR"

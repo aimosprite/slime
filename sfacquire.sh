@@ -22,7 +22,7 @@ fi
 # Show zones and pick one
 echo "Fetching available zones..."
 echo ""
-sf zones ls
+sf zones --list
 echo ""
 echo "Pick a zone from the list above."
 read -p "Zone [richmond]: " zone
