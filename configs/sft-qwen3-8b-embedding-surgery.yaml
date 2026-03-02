@@ -1,228 +1,76 @@
-# =============================================================================
 # SFT Embedding Surgery — Qwen3-8B
-#
-# Goal: Understand how quickly a model can re-learn embeddings after they are
-# randomly re-initialized. This informs the larger project of distilling
-# Qwen3-32B into Qwen3-8B by replacing its tokenizer.
-#
-# Experiment v0:
-#   - Take Qwen3-8B base
-#   - Randomize embed_tokens + lm_head weights with N(0, init_std)
-#   - Freeze all transformer layers (attention, FFN, norms)
-#   - SFT on AM-Qwen3-Distilled (1.89M reasoning traces from Qwen3-235B-A22B)
-#   - Track: loss curve, embedding norm growth, downstream evals
-#
-# NOTE: Keys here become uppercase env vars. Env vars already set (e.g. from
-# the shell before launching) take precedence over values in this file.
-# Secrets (WANDB_KEY, HF_TOKEN) live in .env — never put them here.
-# =============================================================================
+# Goal: Re-learn embeddings after random re-init; transformer frozen, only embed_tokens + lm_head trained.
+# Keys → uppercase env vars; env vars already set take precedence. Secrets (WANDB_KEY, HF_TOKEN) in .env.
 
-# ─── Experiment identity ───────────────────────────────────────────────────────
-experiment_name: qwen3-8b-embedding-surgery-v0
-# Bump version each time you change hyperparams significantly
+experiment_name:    qwen3-8b-embedding-surgery-v0  # bump version when hyperparams change significantly
 experiment_version: 0
 
-# ─── Paths ────────────────────────────────────────────────────────────────────
+pool_dir:   /root/slime/models                  # root for all heavy artifacts; sub-paths derived in script
+hf_model:   Qwen/Qwen3-8B                       # base model to download
+hf_dataset: a-m-team/AM-Qwen3-Distilled         # 1.89M reasoning traces from Qwen3-235B-A22B
+run_log:    /root/slime/models/run-sft.log       # tee'd stdout/stderr; tail -f to watch
 
-# Root directory for all heavy artifacts: model weights, checkpoints, datasets.
-# Sub-paths are derived inside the script as: ${POOL_DIR}/${MODEL_NAME}-<suffix>
-pool_dir: /root/slime/models
+do_prep:               0  # 1 on first run: download → randomize → convert → dataset; idempotent
+convert_nproc_per_node: 8  # GPUs for HF → Megatron torchrun conversion
 
-# HuggingFace model ID to download as the base model
-hf_model: Qwen/Qwen3-8B
+init_std:     0.02                   # N(0, init_std) re-init for embed_tokens + lm_head
+init_seed:    42                     # RNG seed for weight randomization
+train_params: embedding output_layer # Megatron param patterns to train; everything else frozen
 
-# HuggingFace dataset ID to train on
-hf_dataset: a-m-team/AM-Qwen3-Distilled
+input_key:           messages  # parquet column holding list of {role, content} dicts
+loss_mask_type:      qwen3     # loss mask template: qwen | qwen3 | distill_qwen — must match model family
+apply_chat_template: 1         # treat input as OpenAI message format; apply HF tokenizer chat template
+tool_key:            tools     # metadata key for tool definitions (AM dataset includes tool-call examples)
+rollout_shuffle:     1         # shuffle dataset at each epoch
+rollout_seed:        42        # RNG seed for data shuffle / sampling
 
-# Persistent log: all stdout/stderr from the run is tee'd here.
-# Survives tmux/screen detach. Check with: tail -f <path>
-run_log: /root/slime/models/run-sft.log
+seq_length:              8192  # max sequence length in Megatron (also sets max_position_embeddings)
+rollout_max_context_len: 8192  # filter / truncate examples longer than this (prompt + response tokens)
 
-# ─── Prep control ─────────────────────────────────────────────────────────────
+num_epoch:          1    # full passes over AM-Qwen3-Distilled; 1 epoch ≈ 14,750 steps at gbs=128
+global_batch_size:  128  # total samples per gradient update across all GPUs
+rollout_batch_size: 128  # samples fetched per data-loader call; must be >= global_batch_size
+micro_batch_size:   1    # per-GPU samples per forward pass (dynamic batching disabled: packing requires TE)
+save_interval:      100  # checkpoint every N gradient steps; old checkpoints overwritten after HF upload
 
-# Set to 1 on first run to trigger: download → randomize → convert → dataset prep.
-# Script is idempotent: already-done steps are skipped.
-# Override at call site: DO_PREP=1 bash scripts/sft-qwen3-8b-AM-embedding-swap.sh
-do_prep: 0
+loss_type:                              sft_loss  # cross-entropy on assistant turns only
+calculate_per_token_loss:               1         # normalize loss per token, not per sequence
+disable_compute_advantages_and_returns: 1         # SFT: no RL advantages / returns needed
+debug_train_only:                       1         # skip SGLang; tokenize directly from parquet
 
-# Number of GPUs to use for HF → Megatron format conversion via torchrun.
-# More GPUs = faster conversion (parallel tensor sharding).
-convert_nproc_per_node: 8
+optimizer:          adam    # standard Adam; no fused kernels required
+lr:                 5e-4   # peak LR; high because embeddings start from random noise
+min_lr:             1e-5   # floor LR at end of cosine schedule
+lr_decay_style:     cosine # cosine | linear | constant | inverse_sqrt
+lr_warmup_fraction: 0.05   # fraction of total steps for linear warmup
+weight_decay:       0.01   # L2 penalty; low so decay doesn't fight random→meaningful transition
+clip_grad:          1.0    # gradient norm clipping
+adam_beta1:         0.9    # first moment (momentum)
+adam_beta2:         0.95   # second moment; lower than 0.999 for faster adaptation on random-init params
 
-# ─── Embedding surgery ────────────────────────────────────────────────────────
+tensor_model_parallel_size:  1  # TP=1 (data-parallel only); 8B fits on one 80GB GPU
+pipeline_model_parallel_size: 1  # PP=1
+context_parallel_size:       1  # CP=1; not useful unless sequences > 32K
+expert_model_parallel_size:  1  # EP=1; Qwen3-8B is dense (no MoE)
+expert_tensor_parallel_size: 1  # ETP=1
+actor_num_nodes:             1  # training nodes
+actor_num_gpus_per_node:     8  # all 8 GPUs
 
-# Standard deviation of N(0, init_std) used to re-initialize embed_tokens + lm_head.
-# 0.02 matches typical embedding init in pre-training (e.g. GPT-2, Qwen).
-# Try smaller (0.002) or larger (0.1) to see effect on convergence speed.
-init_std: 0.02
+recompute_granularity: full    # full | selective; full recomputes all activations (most memory-efficient)
+recompute_method:      uniform # uniform | block
+recompute_num_layers:  1       # recompute every layer (all 36 for Qwen3-8B)
 
-# RNG seed for weight randomization — keep fixed for reproducibility.
-init_seed: 42
+attention_dropout: 0.0  # disabled for fine-tuning
+hidden_dropout:    0.0  # disabled for fine-tuning
 
-# Space-separated Megatron param-name patterns to TRAIN.
-# Everything else is frozen. "embedding" matches embed_tokens,
-# "output_layer" matches lm_head.
-# To train everything (ablation): comment this out and remove FREEZE_ARGS from script.
-train_params: embedding output_layer
+transformer_impl:  local  # local = pure PyTorch; swap to transformer_engine once TE+Apex installed
+attention_backend: flash  # flash | unfused; with --transformer-impl local falls back to DotProductAttention
 
-# ─── Dataset ──────────────────────────────────────────────────────────────────
+checkpoint_ship_enabled:   1   # upload each saved checkpoint to HF Hub in background
+checkpoint_ship_poll_sec:  30  # polling interval (seconds)
+checkpoint_hf_repo_id:     lerchen3/qwen3-32b-to-8b-embedding-surgery
+checkpoint_hf_private:     0   # 0 = public
+checkpoint_hf_create_repo: 1   # auto-create repo if not exists
 
-# Column in the parquet file that holds the conversation (list of role/content dicts)
-input_key: messages
-
-# Shuffle dataset before each epoch (1=yes, 0=no)
-rollout_shuffle: 1
-
-# ─── Training ─────────────────────────────────────────────────────────────────
-
-# Passes over the full dataset. 1 epoch of AM-Qwen3-Distilled ≈ 1.89M examples.
-# With global_batch_size=128, that's ~14,750 gradient steps.
-num_epoch: 1
-
-# Total samples per gradient update step (across all GPUs).
-# With 8 GPUs and dynamic batching, actual micro-batches vary per step.
-global_batch_size: 128
-
-# Samples fetched per data-loader iteration. Must be >= global_batch_size.
-rollout_batch_size: 128
-
-# Save a Megatron checkpoint every N gradient steps.
-# 500 steps ≈ every ~3-4% of training. Adjust if disk is tight.
-save_interval: 500
-
-# Maximum tokens per GPU per micro-batch. This is the primary memory knob.
-# 8192 is conservative for an 8B model on 80GB GPUs with frozen transformer.
-# Can push to 12288 or 16384 if OOM does not occur.
-max_tokens_per_gpu: 8192
-
-# Loss function. sft_loss = standard cross-entropy on assistant turns.
-loss_type: sft_loss
-
-# Normalize loss per token (not per sequence). Better calibration with
-# variable-length data; prevents short examples from dominating.
-calculate_per_token_loss: 1
-
-# SFT mode flags: disable RL-specific components (advantages, returns).
-disable_compute_advantages_and_returns: 1
-
-# Skip SGLang rollout engine entirely. SFT uses pre-generated data, so no
-# live inference needed. Required for pure SFT.
-debug_train_only: 1
-
-# ─── Optimizer ────────────────────────────────────────────────────────────────
-
-# Adam optimizer (standard, no fused kernels needed).
-optimizer: adam
-
-# Peak learning rate. MUCH higher than a typical fine-tune (1e-5 to 1e-4)
-# because embeddings start from pure noise — they need aggressive updates
-# early in training. If loss diverges, halve this first.
-lr: 5e-4
-
-# Minimum LR reached at end of cosine decay.
-# Set to ~2% of peak LR; too-small min_lr can cause instability near end.
-min_lr: 1e-5
-
-# LR schedule shape. Cosine annealing works well for SFT.
-# Options: cosine, linear, constant, inverse_sqrt
-lr_decay_style: cosine
-
-# Fraction of total training steps used for linear warmup.
-# 5% warmup = ~737 steps out of 14,750. Helps embeddings stabilize before
-# the full LR kicks in.
-lr_warmup_fraction: 0.05
-
-# L2 weight decay. Low (0.01) since we only train embeddings — heavy decay
-# would actively fight the random → meaningful transition.
-weight_decay: 0.01
-
-# Adam beta1 (first moment / momentum). Standard 0.9.
-adam_beta1: 0.9
-
-# Adam beta2 (second moment). 0.95 instead of default 0.999 —
-# adapts faster to gradient magnitude changes, good for random-init params.
-adam_beta2: 0.95
-
-# ─── Parallelism ──────────────────────────────────────────────────────────────
-
-# Tensor model parallelism. 1 = data parallel only (DDP across 8 GPUs).
-# Qwen3-8B at TP=1 fits comfortably on a single 80GB GPU.
-# Increase to 2 or 4 only if you want to train on longer sequences.
-tensor_model_parallel_size: 1
-
-# Pipeline parallelism. Keep at 1; PP adds latency and complexity not needed here.
-pipeline_model_parallel_size: 1
-
-# Context parallelism. Disabled (1). Only useful for extremely long sequences.
-context_parallel_size: 1
-
-# Expert model/tensor parallelism. N/A for dense Qwen3-8B (no MoE).
-expert_model_parallel_size: 1
-expert_tensor_parallel_size: 1
-
-# Number of actor (training) nodes.
-actor_num_nodes: 1
-
-# GPUs per actor node. All 8 for training.
-actor_num_gpus_per_node: 8
-
-# ─── Activation recompute ─────────────────────────────────────────────────────
-
-# Recompute activations during backward pass to save memory at cost of ~30% compute.
-# "full" = recompute all activations (most memory-efficient).
-# "selective" = only recompute attention (faster but uses more memory).
-recompute_granularity: full
-
-# Uniform = same number of layers recomputed across pipeline stages.
-recompute_method: uniform
-
-# Recompute every N layers. 1 = all 36 layers of Qwen3-8B.
-# Increase to 2 or 4 to skip recompute on some layers if memory allows.
-recompute_num_layers: 1
-
-# ─── Regularization ───────────────────────────────────────────────────────────
-
-# Dropout on attention weights. 0.0 for fine-tuning (disabled).
-attention_dropout: 0.0
-
-# Dropout on hidden states. 0.0 for fine-tuning (disabled).
-hidden_dropout: 0.0
-
-# ─── Precision ────────────────────────────────────────────────────────────────
-
-# Transformer implementation backend.
-# "transformer_engine" = fastest (requires TransformerEngine + Apex installed).
-# "local" = pure PyTorch fallback — slower but no extra dependencies.
-# CHANGE TO transformer_engine once you run: pip install transformer_engine[pytorch]==2.10.0
-transformer_impl: local
-
-# Flash attention kernel. Fastest for standard dense attention.
-# Set to "unfused" if you hit kernel-level errors.
-attention_backend: flash
-
-# ─── HF Hub checkpoint shipping ───────────────────────────────────────────────
-
-# 1 = background process ships each saved checkpoint to HF Hub.
-# 0 = no shipping (checkpoints live only on disk).
-checkpoint_ship_enabled: 1
-
-# How often (seconds) the shipper polls for a new checkpoint to upload.
-checkpoint_ship_poll_sec: 30
-
-# Target HF Hub repo: username/repo-name
-checkpoint_hf_repo_id: lerchen3/qwen3-32b-to-8b-embedding-surgery
-
-# 0 = public repo (anyone can see weights), 1 = private
-checkpoint_hf_private: 0
-
-# Auto-create the HF repo if it does not exist yet.
-checkpoint_hf_create_repo: 1
-
-# ─── Weights & Biases ─────────────────────────────────────────────────────────
-
-# WandB project. All runs in the same project show up together in the dashboard.
 wandb_project: slime-dev
-
-# WandB group. Groups related runs (e.g. all embedding-surgery variants).
-# Suggested naming: qwen3-8b-embedding-surgery-<variant>
-wandb_group: qwen3-8b-embedding-surgery
+wandb_group:   qwen3-8b-embedding-surgery

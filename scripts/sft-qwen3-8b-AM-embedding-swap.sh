@@ -73,9 +73,15 @@ NUM_EPOCH="${NUM_EPOCH:-1}"
 GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-128}"
 ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-128}"
 SAVE_INTERVAL="${SAVE_INTERVAL:-500}"
-MAX_TOKENS_PER_GPU="${MAX_TOKENS_PER_GPU:-8192}"
+MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-1}"
 INPUT_KEY="${INPUT_KEY:-messages}"
 LOSS_TYPE="${LOSS_TYPE:-sft_loss}"
+LOSS_MASK_TYPE="${LOSS_MASK_TYPE:-qwen3}"
+APPLY_CHAT_TEMPLATE="${APPLY_CHAT_TEMPLATE:-0}"
+TOOL_KEY="${TOOL_KEY:-tools}"
+ROLLOUT_SEED="${ROLLOUT_SEED:-42}"
+SEQ_LENGTH="${SEQ_LENGTH:-8192}"
+ROLLOUT_MAX_CONTEXT_LEN="${ROLLOUT_MAX_CONTEXT_LEN:-8192}"
 
 # Optimizer
 LR="${LR:-5e-4}"
@@ -85,6 +91,7 @@ LR_WARMUP_FRACTION="${LR_WARMUP_FRACTION:-0.05}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-0.01}"
 ADAM_BETA1="${ADAM_BETA1:-0.9}"
 ADAM_BETA2="${ADAM_BETA2:-0.95}"
+CLIP_GRAD="${CLIP_GRAD:-1.0}"
 OPTIMIZER="${OPTIMIZER:-adam}"
 
 # Parallelism
@@ -125,10 +132,42 @@ WANDB_KEY="${WANDB_KEY:-${WANDB_API_KEY:-}}"
 mkdir -p "$(dirname "${RUN_LOG}")"
 exec > >(tee -a "${RUN_LOG}") 2>&1
 echo "=== Run started at $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
-echo "Config:     ${TRAIN_CONFIG}"
-echo "POOL_DIR:   ${POOL_DIR}"
-echo "MEGATRON:   ${MEGATRON_PATH}"
-echo "Log:        ${RUN_LOG}"
+echo ""
+echo "  config:               ${TRAIN_CONFIG}"
+echo "  pool_dir:             ${POOL_DIR}"
+echo "  megatron:             ${MEGATRON_PATH}"
+echo "  log:                  ${RUN_LOG}"
+echo ""
+echo "  model:                ${HF_MODEL}"
+echo "  dataset:              ${HF_DATASET}"
+echo "  dataset_path:         ${DATASET_PATH}"
+echo ""
+echo "  train_params:         ${TRAIN_PARAMS}"
+echo "  init_std:             ${INIT_STD}  seed=${INIT_SEED}"
+echo ""
+echo "  loss_mask_type:       ${LOSS_MASK_TYPE}"
+echo "  apply_chat_template:  ${APPLY_CHAT_TEMPLATE}"
+echo "  tool_key:             ${TOOL_KEY}"
+echo "  seq_length:           ${SEQ_LENGTH}"
+echo "  rollout_max_ctx:      ${ROLLOUT_MAX_CONTEXT_LEN}"
+echo ""
+echo "  num_epoch:            ${NUM_EPOCH}"
+echo "  global_batch_size:    ${GLOBAL_BATCH_SIZE}"
+echo "  rollout_batch_size:   ${ROLLOUT_BATCH_SIZE}"
+echo "  micro_batch_size:     ${MICRO_BATCH_SIZE}"
+echo "  save_interval:        ${SAVE_INTERVAL}"
+echo ""
+echo "  lr:                   ${LR}  min=${MIN_LR}  decay=${LR_DECAY_STYLE}  warmup=${LR_WARMUP_FRACTION}"
+echo "  weight_decay:         ${WEIGHT_DECAY}  clip_grad=${CLIP_GRAD}"
+echo "  adam:                 b1=${ADAM_BETA1}  b2=${ADAM_BETA2}"
+echo ""
+echo "  tp=${TENSOR_MODEL_PARALLEL_SIZE}  pp=${PIPELINE_MODEL_PARALLEL_SIZE}  cp=${CONTEXT_PARALLEL_SIZE}  gpus=${ACTOR_NUM_GPUS_PER_NODE}x${ACTOR_NUM_NODES}"
+echo "  transformer_impl:     ${TRANSFORMER_IMPL}  attention_backend=${ATTENTION_BACKEND}"
+echo "  recompute:            ${RECOMPUTE_GRANULARITY}/${RECOMPUTE_METHOD}  layers=${RECOMPUTE_NUM_LAYERS}"
+echo ""
+echo "  wandb:                ${WANDB_PROJECT}/${WANDB_GROUP}"
+echo "  hf_repo:              ${CHECKPOINT_HF_REPO_ID}"
+echo ""
 
 # ======================== HF LOGIN ========================
 export HF_TOKEN="${HF_TOKEN:-}"
@@ -323,17 +362,22 @@ start_checkpoint_shipper() {
                    [ "${step}" != "${last_synced_step}" ]; then
                     iter_dir="${SLIME_DIR}/iter_$(printf '%07d' "${step}")"
                     if [ -d "${iter_dir}" ]; then
-                        echo "[shipper] Uploading step ${step}..."
+                        echo "[shipper] Uploading step ${step} -> checkpoint/ ..."
                         if huggingface-cli upload "${CHECKPOINT_HF_REPO_ID}" \
                                 "${iter_dir}" \
-                                "iter_$(printf '%07d' "${step}")" \
+                                "checkpoint" \
                                 --repo-type model 2>&1; then
                             # Also upload the tracker file so HF repo shows latest step
                             huggingface-cli upload "${CHECKPOINT_HF_REPO_ID}" \
                                 "${tracker}" "latest_checkpointed_iteration.txt" \
                                 --repo-type model >/dev/null 2>&1 || true
                             last_synced_step="${step}"
-                            echo "[shipper] Step ${step} uploaded."
+                            echo "[shipper] Step ${step} uploaded (overwrote checkpoint/)."
+                            # Delete old checkpoint dirs — keep only the latest on disk
+                            for old_dir in "${SLIME_DIR}/iter_"*/; do
+                                [ "${old_dir%/}" != "${iter_dir}" ] && rm -rf "${old_dir}" \
+                                    && echo "[shipper] Deleted old checkpoint: ${old_dir}"
+                            done
                         else
                             echo "[shipper] Upload FAILED for step ${step} — will retry next poll."
                         fi
@@ -375,7 +419,11 @@ SFT_ARGS=(
     --rollout-function-path slime.rollout.sft_rollout.generate_rollout
     --prompt-data           "${DATASET_PATH}"
     --input-key             "${INPUT_KEY}"
+    --loss-mask-type        "${LOSS_MASK_TYPE}"
+    --tool-key              "${TOOL_KEY}"
     --rollout-shuffle
+    --rollout-seed          "${ROLLOUT_SEED}"
+    --rollout-max-context-len "${ROLLOUT_MAX_CONTEXT_LEN}"
     --num-epoch             "${NUM_EPOCH}"
     --rollout-batch-size    "${ROLLOUT_BATCH_SIZE}"
     --global-batch-size     "${GLOBAL_BATCH_SIZE}"
@@ -385,6 +433,7 @@ SFT_ARGS=(
     --disable-compute-advantages-and-returns
     --debug-train-only
 )
+[ "${APPLY_CHAT_TEMPLATE}" = "1" ] && SFT_ARGS+=(--apply-chat-template)
 
 FREEZE_ARGS=(
     # Only train embedding + output projection; freeze all transformer layers.
@@ -405,8 +454,7 @@ PERF_ARGS=(
     --recompute-method       "${RECOMPUTE_METHOD}"
     --recompute-num-layers   "${RECOMPUTE_NUM_LAYERS}"
 
-    --use-dynamic-batch-size
-    --max-tokens-per-gpu "${MAX_TOKENS_PER_GPU}"
+    --micro-batch-size "${MICRO_BATCH_SIZE}"
 )
 
 OPTIMIZER_ARGS=(
@@ -416,6 +464,7 @@ OPTIMIZER_ARGS=(
     --min-lr              "${MIN_LR}"
     --lr-warmup-fraction  "${LR_WARMUP_FRACTION}"
     --weight-decay        "${WEIGHT_DECAY}"
+    --clip-grad           "${CLIP_GRAD}"
     --adam-beta1          "${ADAM_BETA1}"
     --adam-beta2          "${ADAM_BETA2}"
 )
@@ -434,6 +483,7 @@ MISC_ARGS=(
     --attention-softmax-in-fp32
     --attention-backend             "${ATTENTION_BACKEND}"
     --no-gradient-accumulation-fusion
+    --seq-length                    "${SEQ_LENGTH}"
 )
 
 # ======================== LAUNCH ========================
