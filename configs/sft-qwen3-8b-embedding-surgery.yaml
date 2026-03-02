@@ -24,8 +24,8 @@ tool_key:            tools     # metadata key for tool definitions (AM dataset i
 rollout_shuffle:     1         # shuffle dataset at each epoch
 rollout_seed:        42        # RNG seed for data shuffle / sampling
 
-seq_length:              8192  # max sequence length in Megatron (also sets max_position_embeddings)
-rollout_max_context_len: 8192  # filter / truncate examples longer than this (prompt + response tokens)
+seq_length:              32768  # max sequence length in Megatron (covers 100% of AM dataset, max ~25K)
+rollout_max_context_len: 32768  # filter / truncate examples longer than this (prompt + response tokens)
 
 num_epoch:          1    # full passes over AM-Qwen3-Distilled; 1 epoch ≈ 14,750 steps at gbs=128
 global_batch_size:  128  # total samples per gradient update across all GPUs
