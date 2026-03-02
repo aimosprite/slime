@@ -10,52 +10,136 @@
 #   DO_PREP=1 bash scripts/sft-qwen3-8b-AM-embedding-swap.sh  # first time
 #   bash scripts/sft-qwen3-8b-AM-embedding-swap.sh             # resume / retrain
 #
-# Required env vars:
-#   WANDB_KEY    — Weights & Biases API key
-#   HF_TOKEN     — HuggingFace token (for model download + checkpoint shipping)
+# Config:  configs/sft-qwen3-8b-embedding-surgery.yaml  (all params, documented)
+# Secrets: .env  (WANDB_KEY, HF_TOKEN — never commit these)
 # =============================================================================
 
-# ======================== CONFIGURATION ========================
-
-POOL_DIR="${POOL_DIR:-/root}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-# --- Model ---
-HF_MODEL="Qwen/Qwen3-8B"
-MODEL_DIR="${POOL_DIR}/Qwen3-8B"
-RANDOM_EMB_DIR="${POOL_DIR}/Qwen3-8B-random-emb"
-MEGATRON_REF_DIR="${POOL_DIR}/Qwen3-8B-random-emb_torch_dist"
-SLIME_DIR="${POOL_DIR}/Qwen3-8B-random-emb_slime"
+# ======================== LOAD CONFIG ========================
+# YAML keys become uppercase env vars. Already-set env vars take precedence.
+TRAIN_CONFIG="${TRAIN_CONFIG:-${REPO_DIR}/configs/sft-qwen3-8b-embedding-surgery.yaml}"
+if [ -f "${TRAIN_CONFIG}" ]; then
+    eval "$(python3 - "${TRAIN_CONFIG}" <<'PYEOF'
+import sys, re, os
+for line in open(sys.argv[1]):
+    line = line.split('#')[0].strip()
+    m = re.match(r'^([a-z_]+):\s*(\S.*)', line)
+    if m:
+        k, v = m.group(1).upper(), m.group(2).strip()
+        if k not in os.environ:
+            print(f"export {k}='{v}'")
+PYEOF)"
+    echo "Loaded config: ${TRAIN_CONFIG}"
+else
+    echo "WARNING: config not found at ${TRAIN_CONFIG}, using script defaults"
+fi
 
-# --- Dataset ---
-HF_DATASET="a-m-team/AM-Qwen3-Distilled"
+# Load .env for secrets (WANDB_KEY, HF_TOKEN) — these take precedence if already set
+if [ -f "${REPO_DIR}/.env" ]; then
+    set -a
+    source "${REPO_DIR}/.env"
+    set +a
+fi
+
+# ======================== PATHS ========================
+POOL_DIR="${POOL_DIR:-/root/slime/models}"
+MEGATRON_PATH="${MEGATRON_PATH:-${REPO_DIR}/Megatron-LM}"
+RUN_LOG="${RUN_LOG:-${POOL_DIR}/run-sft.log}"
+
+HF_MODEL="${HF_MODEL:-Qwen/Qwen3-8B}"
+HF_DATASET="${HF_DATASET:-a-m-team/AM-Qwen3-Distilled}"
+MODEL_NAME="${HF_MODEL##*/}"                       # e.g. "Qwen3-8B"
+
+MODEL_DIR="${POOL_DIR}/${MODEL_NAME}"
+RANDOM_EMB_DIR="${POOL_DIR}/${MODEL_NAME}-random-emb"
+MEGATRON_REF_DIR="${POOL_DIR}/${MODEL_NAME}-random-emb_torch_dist"
+SLIME_DIR="${POOL_DIR}/${MODEL_NAME}-random-emb_slime"
 DATASET_PATH="${POOL_DIR}/am-qwen3-distilled.parquet"
 
-# --- Embedding init ---
-INIT_STD=0.02
-INIT_SEED=42
+# Embedding surgery
+INIT_STD="${INIT_STD:-0.02}"
+INIT_SEED="${INIT_SEED:-42}"
+TRAIN_PARAMS="${TRAIN_PARAMS:-embedding output_layer}"
+CONVERT_NPROC_PER_NODE="${CONVERT_NPROC_PER_NODE:-8}"
 
-# --- Training ---
-NUM_EPOCH=1
-GLOBAL_BATCH_SIZE=128
-ROLLOUT_BATCH_SIZE=128
-SAVE_INTERVAL=500
-MAX_TOKENS_PER_GPU=8192
+# Training
+NUM_EPOCH="${NUM_EPOCH:-1}"
+GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-128}"
+ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-128}"
+SAVE_INTERVAL="${SAVE_INTERVAL:-500}"
+MAX_TOKENS_PER_GPU="${MAX_TOKENS_PER_GPU:-8192}"
+INPUT_KEY="${INPUT_KEY:-messages}"
+LOSS_TYPE="${LOSS_TYPE:-sft_loss}"
 
-# --- Optimizer (higher LR — embeddings start from random) ---
-LR=5e-4
-MIN_LR=1e-5
-LR_WARMUP_FRACTION=0.05
-WEIGHT_DECAY=0.01
+# Optimizer
+LR="${LR:-5e-4}"
+MIN_LR="${MIN_LR:-1e-5}"
+LR_DECAY_STYLE="${LR_DECAY_STYLE:-cosine}"
+LR_WARMUP_FRACTION="${LR_WARMUP_FRACTION:-0.05}"
+WEIGHT_DECAY="${WEIGHT_DECAY:-0.01}"
+ADAM_BETA1="${ADAM_BETA1:-0.9}"
+ADAM_BETA2="${ADAM_BETA2:-0.95}"
+OPTIMIZER="${OPTIMIZER:-adam}"
 
-# --- Checkpoint shipping to HF Hub ---
+# Parallelism
+TENSOR_MODEL_PARALLEL_SIZE="${TENSOR_MODEL_PARALLEL_SIZE:-1}"
+PIPELINE_MODEL_PARALLEL_SIZE="${PIPELINE_MODEL_PARALLEL_SIZE:-1}"
+CONTEXT_PARALLEL_SIZE="${CONTEXT_PARALLEL_SIZE:-1}"
+EXPERT_MODEL_PARALLEL_SIZE="${EXPERT_MODEL_PARALLEL_SIZE:-1}"
+EXPERT_TENSOR_PARALLEL_SIZE="${EXPERT_TENSOR_PARALLEL_SIZE:-1}"
+ACTOR_NUM_NODES="${ACTOR_NUM_NODES:-1}"
+ACTOR_NUM_GPUS_PER_NODE="${ACTOR_NUM_GPUS_PER_NODE:-8}"
+
+# Recompute
+RECOMPUTE_GRANULARITY="${RECOMPUTE_GRANULARITY:-full}"
+RECOMPUTE_METHOD="${RECOMPUTE_METHOD:-uniform}"
+RECOMPUTE_NUM_LAYERS="${RECOMPUTE_NUM_LAYERS:-1}"
+
+# Regularization
+ATTENTION_DROPOUT="${ATTENTION_DROPOUT:-0.0}"
+HIDDEN_DROPOUT="${HIDDEN_DROPOUT:-0.0}"
+
+# Precision
+TRANSFORMER_IMPL="${TRANSFORMER_IMPL:-local}"
+ATTENTION_BACKEND="${ATTENTION_BACKEND:-flash}"
+
+# Checkpoint shipping
 CHECKPOINT_SHIP_ENABLED="${CHECKPOINT_SHIP_ENABLED:-1}"
-CHECKPOINT_SHIP_POLL_SEC=30
-CHECKPOINT_HF_REPO_ID="${CHECKPOINT_HF_REPO_ID:-qwen3-32b-to-8b-embedding-surgery}"
+CHECKPOINT_SHIP_POLL_SEC="${CHECKPOINT_SHIP_POLL_SEC:-30}"
+CHECKPOINT_HF_REPO_ID="${CHECKPOINT_HF_REPO_ID:-lerchen3/qwen3-32b-to-8b-embedding-surgery}"
+CHECKPOINT_HF_PRIVATE="${CHECKPOINT_HF_PRIVATE:-0}"
+CHECKPOINT_HF_CREATE_REPO="${CHECKPOINT_HF_CREATE_REPO:-1}"
+
+# WandB
+WANDB_PROJECT="${WANDB_PROJECT:-slime-dev}"
+WANDB_GROUP="${WANDB_GROUP:-qwen3-8b-embedding-surgery}"
+WANDB_KEY="${WANDB_KEY:-${WANDB_API_KEY:-}}"
+
+# ======================== PERSISTENT LOG ========================
+mkdir -p "$(dirname "${RUN_LOG}")"
+exec > >(tee -a "${RUN_LOG}") 2>&1
+echo "=== Run started at $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
+echo "Config:     ${TRAIN_CONFIG}"
+echo "POOL_DIR:   ${POOL_DIR}"
+echo "MEGATRON:   ${MEGATRON_PATH}"
+echo "Log:        ${RUN_LOG}"
+
+# ======================== HF LOGIN ========================
+export HF_TOKEN="${HF_TOKEN:-}"
+if [ -n "${HF_TOKEN}" ]; then
+    huggingface-cli login --token "${HF_TOKEN}" --add-to-git-credential >/dev/null 2>&1 \
+        || huggingface-cli login --token "${HF_TOKEN}" >/dev/null 2>&1 \
+        || true
+fi
+if ! huggingface-cli whoami >/dev/null 2>&1; then
+    echo "ERROR: HF auth failed. Set HF_TOKEN in .env or run 'huggingface-cli login'."
+    exit 1
+fi
+echo "HF auth OK: $(huggingface-cli whoami 2>/dev/null | head -1)"
 
 # ======================== PREP ========================
-
 DO_PREP="${DO_PREP:-0}"
 
 if [ "${DO_PREP}" = "1" ]; then
@@ -63,40 +147,41 @@ if [ "${DO_PREP}" = "1" ]; then
     echo "  PREP: Download, randomize, convert"
     echo "=========================================="
 
-    # 1. Download model
+    # 1. Download base model
     if [ ! -d "${MODEL_DIR}" ]; then
         echo "--- Downloading ${HF_MODEL} ---"
-        huggingface-cli download ${HF_MODEL} --local-dir ${MODEL_DIR}
+        huggingface-cli download "${HF_MODEL}" --local-dir "${MODEL_DIR}"
     else
-        echo "--- Model already exists at ${MODEL_DIR}, skipping download ---"
+        echo "--- Model already exists at ${MODEL_DIR}, skipping ---"
     fi
 
-    # 2. Randomize embeddings
+    # 2. Randomize embed_tokens + lm_head
     if [ ! -d "${RANDOM_EMB_DIR}" ]; then
         echo "--- Randomizing embeddings (std=${INIT_STD}, seed=${INIT_SEED}) ---"
-        python3 ${REPO_DIR}/tools/randomize_embeddings.py \
-            --input-dir ${MODEL_DIR} \
-            --output-dir ${RANDOM_EMB_DIR} \
-            --init-std ${INIT_STD} \
-            --seed ${INIT_SEED}
+        python3 "${REPO_DIR}/tools/randomize_embeddings.py" \
+            --input-dir  "${MODEL_DIR}" \
+            --output-dir "${RANDOM_EMB_DIR}" \
+            --init-std   "${INIT_STD}" \
+            --seed       "${INIT_SEED}"
     else
         echo "--- Random-emb model already exists at ${RANDOM_EMB_DIR}, skipping ---"
     fi
 
-    # 3. Convert HF -> Megatron torch_dist format
+    # 3. Convert HF → Megatron torch_dist format (parallelized over all GPUs)
     if [ ! -d "${MEGATRON_REF_DIR}" ]; then
-        echo "--- Converting HF -> Megatron ---"
+        echo "--- Converting HF -> Megatron (nproc=${CONVERT_NPROC_PER_NODE}) ---"
         source "${SCRIPT_DIR}/models/qwen3-8B.sh"
-
-        torchrun --nproc_per_node=1 ${REPO_DIR}/tools/convert_hf_to_torch_dist.py \
+        PYTHONPATH="${MEGATRON_PATH}" \
+        torchrun --nproc_per_node="${CONVERT_NPROC_PER_NODE}" \
+            "${REPO_DIR}/tools/convert_hf_to_torch_dist.py" \
             "${MODEL_ARGS[@]}" \
-            --hf-checkpoint ${RANDOM_EMB_DIR} \
-            --save ${MEGATRON_REF_DIR} \
-            --tensor-model-parallel-size 1 \
+            --hf-checkpoint                "${RANDOM_EMB_DIR}" \
+            --save                         "${MEGATRON_REF_DIR}" \
+            --tensor-model-parallel-size   1 \
             --pipeline-model-parallel-size 1 \
-            --context-parallel-size 1 \
-            --expert-model-parallel-size 1 \
-            --expert-tensor-parallel-size 1 \
+            --context-parallel-size        1 \
+            --expert-model-parallel-size   1 \
+            --expert-tensor-parallel-size  1 \
             --untie-embeddings-and-output-weights
     else
         echo "--- Megatron checkpoint already exists at ${MEGATRON_REF_DIR}, skipping ---"
@@ -105,9 +190,9 @@ if [ "${DO_PREP}" = "1" ]; then
     # 4. Download & convert dataset
     if [ ! -f "${DATASET_PATH}" ]; then
         echo "--- Downloading & converting dataset ---"
-        python3 ${REPO_DIR}/tools/prep_am_dataset.py \
-            --dataset ${HF_DATASET} \
-            --output ${DATASET_PATH}
+        python3 "${REPO_DIR}/tools/prep_am_dataset.py" \
+            --dataset "${HF_DATASET}" \
+            --output  "${DATASET_PATH}"
     else
         echo "--- Dataset already exists at ${DATASET_PATH}, skipping ---"
     fi
@@ -118,7 +203,6 @@ if [ "${DO_PREP}" = "1" ]; then
 fi
 
 # ======================== VERIFY ARTIFACTS ========================
-
 echo "--- Verifying artifacts ---"
 MISSING=0
 for required in "${RANDOM_EMB_DIR}" "${MEGATRON_REF_DIR}"; do
@@ -132,20 +216,74 @@ if [ ! -f "${DATASET_PATH}" ]; then
     MISSING=1
 fi
 if [ "${MISSING}" = "1" ]; then
-    echo "Run with DO_PREP=1 first."
+    echo "Run with DO_PREP=1 to create missing artifacts."
     exit 1
 fi
 echo "All artifacts present."
 
 # ======================== ENV CHECKS ========================
-
-if [ -z "${WANDB_KEY:-}" ]; then
-    echo "ERROR: WANDB_KEY not set."
+if [ -z "${WANDB_KEY}" ]; then
+    echo "ERROR: WANDB_KEY (or WANDB_API_KEY) not set. Add it to .env."
+    exit 1
+fi
+if [ ! -d "${MEGATRON_PATH}" ]; then
+    echo "ERROR: Megatron-LM not found at ${MEGATRON_PATH}."
+    echo "       Run: git clone https://github.com/NVIDIA/Megatron-LM.git ${MEGATRON_PATH}"
     exit 1
 fi
 
-# ======================== KILL LEFTOVERS ========================
+# ======================== HF PREFLIGHT ========================
+preflight_hf() {
+    echo "=== HF checkpoint shipping preflight ==="
 
+    echo "1. Auth check..."
+    if ! huggingface-cli whoami >/dev/null 2>&1; then
+        echo "FAIL: not authenticated to HuggingFace."
+        return 1
+    fi
+    echo "   OK: $(huggingface-cli whoami 2>/dev/null | head -1)"
+
+    if [ "${CHECKPOINT_HF_CREATE_REPO}" = "1" ]; then
+        echo "2. Creating HF repo (if needed): ${CHECKPOINT_HF_REPO_ID}"
+        local private_flag="--public"
+        [ "${CHECKPOINT_HF_PRIVATE}" = "1" ] && private_flag="--private"
+        local create_out=""
+        if create_out="$(huggingface-cli repo create "${CHECKPOINT_HF_REPO_ID}" \
+                --repo-type model ${private_flag} 2>&1)"; then
+            echo "   Created: ${CHECKPOINT_HF_REPO_ID}"
+        elif echo "${create_out}" | grep -qi "already"; then
+            echo "   Repo already exists: ${CHECKPOINT_HF_REPO_ID}"
+        else
+            echo "FAIL: repo create error:"
+            echo "${create_out}"
+            return 1
+        fi
+    fi
+
+    echo "3. Test upload..."
+    local test_file=""
+    test_file="$(mktemp /tmp/slime_preflight_XXXXXX.txt)"
+    echo "preflight $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${test_file}"
+    local upload_out=""
+    if upload_out="$(huggingface-cli upload "${CHECKPOINT_HF_REPO_ID}" \
+            "${test_file}" ".preflight_test.txt" \
+            --repo-type model 2>&1)"; then
+        echo "   Upload OK"
+    else
+        echo "FAIL: test upload failed:"
+        echo "${upload_out}"
+        rm -f "${test_file}"
+        return 1
+    fi
+    rm -f "${test_file}"
+    echo "=== Preflight PASSED: shipping to ${CHECKPOINT_HF_REPO_ID} is working ==="
+}
+
+if [ "${CHECKPOINT_SHIP_ENABLED}" = "1" ]; then
+    preflight_hf || exit 1
+fi
+
+# ======================== KILL LEFTOVERS ========================
 pkill -9 sglang 2>/dev/null || true
 sleep 3
 ray stop --force 2>/dev/null || true
@@ -157,7 +295,6 @@ set -ex
 export PYTHONUNBUFFERED=1
 
 # ======================== NVLINK DETECTION ========================
-
 NVLINK_COUNT=$(nvidia-smi topo -m 2>/dev/null | grep -o 'NV[0-9][0-9]*' | wc -l)
 if [ "$NVLINK_COUNT" -gt 0 ]; then
     HAS_NVLINK=1
@@ -167,33 +304,36 @@ fi
 echo "HAS_NVLINK: ${HAS_NVLINK} (detected ${NVLINK_COUNT} NVLink references)"
 
 # ======================== CHECKPOINT SHIPPER ========================
-
 CHECKPOINT_SHIPPER_PID=""
 
 start_checkpoint_shipper() {
     local tracker="${SLIME_DIR}/latest_checkpointed_iteration.txt"
     echo "Starting checkpoint shipper (poll every ${CHECKPOINT_SHIP_POLL_SEC}s) -> ${CHECKPOINT_HF_REPO_ID}"
 
-    # Create repo if needed
-    huggingface-cli repo create "${CHECKPOINT_HF_REPO_ID}" --type model 2>/dev/null || true
-
     (
         last_synced_step=""
         while true; do
             if [ -f "${tracker}" ]; then
                 step="$(tr -d '[:space:]' < "${tracker}" || true)"
-                if [ -n "${step}" ] && [ "${step}" != "${last_synced_step}" ]; then
+                # Only ship positive steps that are newly completed
+                if [[ "${step}" =~ ^[0-9]+$ ]] && [ "${step}" -gt 0 ] && \
+                   [ "${step}" != "${last_synced_step}" ]; then
                     iter_dir="${SLIME_DIR}/iter_$(printf '%07d' "${step}")"
                     if [ -d "${iter_dir}" ]; then
                         echo "[shipper] Uploading step ${step}..."
-                        huggingface-cli upload "${CHECKPOINT_HF_REPO_ID}" \
-                            "${iter_dir}" "iter_$(printf '%07d' "${step}")" \
-                            --repo-type model 2>&1 || echo "[shipper] Upload failed for step ${step}"
-                        huggingface-cli upload "${CHECKPOINT_HF_REPO_ID}" \
-                            "${tracker}" "latest_checkpointed_iteration.txt" \
-                            --repo-type model 2>&1 || true
-                        last_synced_step="${step}"
-                        echo "[shipper] Step ${step} uploaded."
+                        if huggingface-cli upload "${CHECKPOINT_HF_REPO_ID}" \
+                                "${iter_dir}" \
+                                "iter_$(printf '%07d' "${step}")" \
+                                --repo-type model 2>&1; then
+                            # Also upload the tracker file so HF repo shows latest step
+                            huggingface-cli upload "${CHECKPOINT_HF_REPO_ID}" \
+                                "${tracker}" "latest_checkpointed_iteration.txt" \
+                                --repo-type model >/dev/null 2>&1 || true
+                            last_synced_step="${step}"
+                            echo "[shipper] Step ${step} uploaded."
+                        else
+                            echo "[shipper] Upload FAILED for step ${step} — will retry next poll."
+                        fi
                     fi
                 fi
             fi
@@ -216,102 +356,108 @@ if [ "${CHECKPOINT_SHIP_ENABLED}" = "1" ]; then
 fi
 
 # ======================== MODEL ARGS ========================
-
 source "${SCRIPT_DIR}/models/qwen3-8B.sh"
 
 # ======================== TRAINING ARGS ========================
 
 CKPT_ARGS=(
-    --hf-checkpoint ${RANDOM_EMB_DIR}
-    --ref-load ${MEGATRON_REF_DIR}
-    --load ${SLIME_DIR}/
-    --save ${SLIME_DIR}/
-    --save-interval ${SAVE_INTERVAL}
+    --hf-checkpoint "${RANDOM_EMB_DIR}"
+    --ref-load      "${MEGATRON_REF_DIR}"
+    --load          "${SLIME_DIR}/"
+    --save          "${SLIME_DIR}/"
+    --save-interval "${SAVE_INTERVAL}"
 )
 
 SFT_ARGS=(
     --rollout-function-path slime.rollout.sft_rollout.generate_rollout
-    --prompt-data ${DATASET_PATH}
-    --input-key messages
+    --prompt-data           "${DATASET_PATH}"
+    --input-key             "${INPUT_KEY}"
     --rollout-shuffle
-    --num-epoch ${NUM_EPOCH}
-    --rollout-batch-size ${ROLLOUT_BATCH_SIZE}
-    --global-batch-size ${GLOBAL_BATCH_SIZE}
+    --num-epoch             "${NUM_EPOCH}"
+    --rollout-batch-size    "${ROLLOUT_BATCH_SIZE}"
+    --global-batch-size     "${GLOBAL_BATCH_SIZE}"
 
-    --loss-type sft_loss
+    --loss-type                            "${LOSS_TYPE}"
     --calculate-per-token-loss
     --disable-compute-advantages-and-returns
     --debug-train-only
 )
 
 FREEZE_ARGS=(
-    # Only train embedding + output projection; freeze all transformer layers
-    --only-train-params-name-list embedding output_layer
+    # Only train embedding + output projection; freeze all transformer layers.
+    # TRAIN_PARAMS="embedding output_layer" — set in config to change.
+    --only-train-params-name-list ${TRAIN_PARAMS}
 )
 
 PERF_ARGS=(
-    --tensor-model-parallel-size 1
+    --bf16
+    --tensor-model-parallel-size   "${TENSOR_MODEL_PARALLEL_SIZE}"
     --sequence-parallel
-    --pipeline-model-parallel-size 1
-    --context-parallel-size 1
-    --expert-model-parallel-size 1
-    --expert-tensor-parallel-size 1
+    --pipeline-model-parallel-size "${PIPELINE_MODEL_PARALLEL_SIZE}"
+    --context-parallel-size        "${CONTEXT_PARALLEL_SIZE}"
+    --expert-model-parallel-size   "${EXPERT_MODEL_PARALLEL_SIZE}"
+    --expert-tensor-parallel-size  "${EXPERT_TENSOR_PARALLEL_SIZE}"
 
-    --recompute-granularity full
-    --recompute-method uniform
-    --recompute-num-layers 1
+    --recompute-granularity  "${RECOMPUTE_GRANULARITY}"
+    --recompute-method       "${RECOMPUTE_METHOD}"
+    --recompute-num-layers   "${RECOMPUTE_NUM_LAYERS}"
 
     --use-dynamic-batch-size
-    --max-tokens-per-gpu ${MAX_TOKENS_PER_GPU}
+    --max-tokens-per-gpu "${MAX_TOKENS_PER_GPU}"
 )
 
 OPTIMIZER_ARGS=(
-    --optimizer adam
-    --lr ${LR}
-    --lr-decay-style cosine
-    --min-lr ${MIN_LR}
-    --lr-warmup-fraction ${LR_WARMUP_FRACTION}
-    --weight-decay ${WEIGHT_DECAY}
-    --adam-beta1 0.9
-    --adam-beta2 0.95
+    --optimizer           "${OPTIMIZER}"
+    --lr                  "${LR}"
+    --lr-decay-style      "${LR_DECAY_STYLE}"
+    --min-lr              "${MIN_LR}"
+    --lr-warmup-fraction  "${LR_WARMUP_FRACTION}"
+    --weight-decay        "${WEIGHT_DECAY}"
+    --adam-beta1          "${ADAM_BETA1}"
+    --adam-beta2          "${ADAM_BETA2}"
 )
 
 WANDB_ARGS=(
     --use-wandb
-    --wandb-project slime-dev
-    --wandb-group qwen3-8b-embedding-surgery
-    --wandb-key ${WANDB_KEY}
+    --wandb-project "${WANDB_PROJECT}"
+    --wandb-group   "${WANDB_GROUP}"
+    --wandb-key     "${WANDB_KEY}"
 )
 
 MISC_ARGS=(
-    --attention-dropout 0.0
-    --hidden-dropout 0.0
+    --attention-dropout             "${ATTENTION_DROPOUT}"
+    --hidden-dropout                "${HIDDEN_DROPOUT}"
     --accumulate-allreduce-grads-in-fp32
     --attention-softmax-in-fp32
-    --attention-backend flash
+    --attention-backend             "${ATTENTION_BACKEND}"
 )
 
 # ======================== LAUNCH ========================
 
-export MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
+export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 export no_proxy="127.0.0.1,${MASTER_ADDR}"
-ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus 8 --disable-usage-stats \
-    --dashboard-host=0.0.0.0 --dashboard-port=8265
+ray start --head \
+    --node-ip-address "${MASTER_ADDR}" \
+    --num-gpus "${ACTOR_NUM_GPUS_PER_NODE}" \
+    --disable-usage-stats \
+    --dashboard-host=0.0.0.0 \
+    --dashboard-port=8265
 
 RUNTIME_ENV_JSON="{
   \"env_vars\": {
-    \"PYTHONPATH\": \"${REPO_DIR}/Megatron-LM/\",
+    \"PYTHONPATH\":                \"${MEGATRON_PATH}\",
     \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
-    \"NCCL_NVLS_ENABLE\": \"${HAS_NVLINK}\",
-    \"PYTORCH_CUDA_ALLOC_CONF\": \"expandable_segments:True\"
+    \"NCCL_NVLS_ENABLE\":          \"${HAS_NVLINK}\",
+    \"NCCL_CUMEM_ENABLE\":         \"0\",
+    \"PYTORCH_CUDA_ALLOC_CONF\":   \"expandable_segments:True\"
   }
 }"
 
 ray job submit --address="http://127.0.0.1:8265" \
     --runtime-env-json="${RUNTIME_ENV_JSON}" \
     -- python3 train_async.py \
-    --actor-num-nodes 1 \
-    --actor-num-gpus-per-node 8 \
+    --actor-num-nodes          "${ACTOR_NUM_NODES}" \
+    --actor-num-gpus-per-node  "${ACTOR_NUM_GPUS_PER_NODE}" \
     "${MODEL_ARGS[@]}" \
     "${CKPT_ARGS[@]}" \
     "${SFT_ARGS[@]}" \

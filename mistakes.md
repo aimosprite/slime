@@ -116,3 +116,42 @@ GPT-OSS model, even with `scaffolding: default`. Updated all configs and README.
 **Lesson:** GPT-OSS uses Harmony channel tags, not standard markdown. This
 applies to both tool_use AND default scaffolding. If eval results look
 suspiciously bad and `exec=0`, check `model_format` first.
+
+## 9. Megatron prep torchrun fails with "No module named 'megatron'"
+
+**Date:** 2026-03-02
+
+**What happened:** `DO_PREP=1` ran `torchrun convert_hf_to_torch_dist.py` without
+setting `PYTHONPATH`. Megatron-LM was cloned to `/root/slime/Megatron-LM/` but
+not on the system path, so the import failed immediately.
+
+**Fix:** Prepend `PYTHONPATH="${MEGATRON_PATH}"` to the torchrun call in the prep
+section. Also installed Megatron-LM with `sudo pip3 install -e .` from the
+cloned directory as a belt-and-suspenders measure.
+
+## 10. transformer_engine and apex not installed — training will fail
+
+**Date:** 2026-03-02
+
+**What happened:** `scripts/models/qwen3-8B.sh` hardcodes `--transformer-impl
+transformer_engine`. Neither `transformer_engine` nor `apex` are installed on
+this machine. Training would have crashed at model initialization.
+
+**Fix:** Made `--transformer-impl` configurable via `${TRANSFORMER_IMPL:-transformer_engine}`
+in `qwen3-8B.sh`. Set `transformer_impl: local` in the config YAML to use the
+pure-PyTorch fallback until the proper libraries are installed.
+
+**To install properly:** Run `setup-env.sh` (requires uv, CUDA toolkit, ~30 min compile)
+or: `pip install transformer_engine[pytorch]==2.10.0 --no-build-isolation`
+
+## 11. Models downloaded to /root/ instead of models/ folder
+
+**Date:** 2026-03-02
+
+**What happened:** `POOL_DIR` in the script defaulted to `/root`, so model
+artifacts (Qwen3-8B, Qwen3-8B-random-emb) were placed in `/root/` instead of
+the repo's `models/` subdirectory. Created a duplicate at `/root/Qwen3-8B`.
+
+**Fix:** Changed `POOL_DIR` default to `/root/slime/models`. Moved artifacts.
+Deleted the duplicate `/root/Qwen3-8B` (16GB freed). Added `models/` and
+`Megatron-LM/` to `.gitignore`.

@@ -179,6 +179,9 @@ settings.json
 wandb/
 outputs/
 local/
+/models/
+*.parquet
+/Megatron-LM/
 **/rollout_data/
 **/buffer_stats/
 *.out

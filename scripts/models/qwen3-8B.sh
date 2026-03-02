@@ -17,5 +17,5 @@ MODEL_ARGS=(
    --qk-layernorm
    --untie-embeddings-and-output-weights
    --no-rope-fusion
-   --transformer-impl transformer_engine
+   --transformer-impl "${TRANSFORMER_IMPL:-transformer_engine}"
 )
