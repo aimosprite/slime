@@ -250,14 +250,12 @@ preflight_hf() {
 
     if [ "${CHECKPOINT_HF_CREATE_REPO}" = "1" ]; then
         echo "2. Creating HF repo (if needed): ${CHECKPOINT_HF_REPO_ID}"
-        local private_flag="--public"
+        local private_flag=""
         [ "${CHECKPOINT_HF_PRIVATE}" = "1" ] && private_flag="--private"
         local create_out=""
         if create_out="$(huggingface-cli repo create "${CHECKPOINT_HF_REPO_ID}" \
-                --repo-type model ${private_flag} 2>&1)"; then
-            echo "   Created: ${CHECKPOINT_HF_REPO_ID}"
-        elif echo "${create_out}" | grep -qi "already"; then
-            echo "   Repo already exists: ${CHECKPOINT_HF_REPO_ID}"
+                --repo-type model --exist-ok ${private_flag} -y 2>&1)"; then
+            echo "   Repo ready: ${CHECKPOINT_HF_REPO_ID}"
         else
             echo "FAIL: repo create error:"
             echo "${create_out}"
