@@ -234,3 +234,15 @@ the repo's `models/` subdirectory. Created a duplicate at `/root/Qwen3-8B`.
 **Fix:** Changed `POOL_DIR` default to `/root/slime/models`. Moved artifacts.
 Deleted the duplicate `/root/Qwen3-8B` (16GB freed). Added `models/` and
 `Megatron-LM/` to `.gitignore`.
+
+## 17. WandB API key was truncated to 20 chars — need 40 chars
+
+**Date:** 2026-03-02
+
+**What happened:** `wandb.login()` crashed with
+`AuthenticationError: API key must have 40+ characters, has 20.`
+The key `f112ee28a4622d0aafc7` stored in `.env` was confirmed by user as "the full key"
+but it's only 20 hex chars. WandB API keys are always 40 hex chars.
+
+**Fix needed:** User must provide the full 40-char WandB API key from
+https://wandb.ai/authorize and update `.env`: `WANDB_KEY=<40-char-key>`
