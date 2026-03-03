@@ -355,6 +355,11 @@ class MegatronTrainRayActor(TrainRayActor):
 
         if self.args.offload_train:
             self.wake_up()
+            # Defragment PyTorch cache immediately after model wake-up, before
+            # compute_log_prob's forward passes. Without this, 10+ GB of fragmented
+            # reserved-but-unallocated cache blocks the logits.clone() allocation
+            # (which can be 6+ GB for long sequences), causing OOM.
+            torch.cuda.empty_cache()
 
         with timer("data_preprocess"):
             rollout_data = self._get_rollout_data(rollout_data_ref)
@@ -552,7 +557,20 @@ class MegatronTrainRayActor(TrainRayActor):
             if dist.get_rank() == 0:
                 ray.get(self.rollout_manager.clear_num_new_engines.remote())
 
-        with torch_memory_saver.disable() if self.args.offload_train else nullcontext():
+        # For non-collocated (separate GPU sets), NCCL broadcast in update_weights()
+        # needs model weights physically present on GPU. torch_memory_saver.disable()
+        # only stops intercepting NEW allocations — it does NOT restore paused (CPU-offloaded)
+        # VMM pages to GPU. So for the distributed case we must resume() first.
+        # For collocated (same-GPU training+rollout), disable() is sufficient.
+        if self.args.offload_train and not self.args.colocate:
+            torch_memory_saver.resume()  # restore VMM pages to GPU for NCCL read
+
+        # Release any fragmented cached GPU memory before the weight sync.
+        # After the optimizer step, PyTorch's caching allocator may hold onto freed
+        # buffers that prevent contiguous allocations needed for the NCCL broadcast.
+        torch.cuda.empty_cache()
+
+        with torch_memory_saver.disable() if (self.args.offload_train and self.args.colocate) else nullcontext():
             print_memory("before update_weights")
             self.weight_updater.update_weights()
             print_memory("after update_weights")
@@ -575,6 +593,10 @@ class MegatronTrainRayActor(TrainRayActor):
                     self.weights_backuper.backup("rollout_actor")
                 else:
                     self.weights_backuper.backup("old_actor")
+
+        if self.args.offload_train and not self.args.colocate:
+            # Re-offload model weights to CPU after the NCCL broadcast completes.
+            torch_memory_saver.pause()
 
         if self.args.offload_train:
             destroy_process_groups()

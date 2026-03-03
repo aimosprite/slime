@@ -276,6 +276,16 @@ def get_log_probs_and_entropy(
 
         log_probs_list.append(log_prob.squeeze(-1))
         entropy_list.append(entropy)
+        # Defragment PyTorch cache between micro-batches.  fused_cross_entropy
+        # converts logits to FP32 internally (seq_len × 151936 × 4 bytes per
+        # sample, ~6+ GB for long sequences). With 30+ samples in
+        # compute_log_prob, freed FP32 tensors accumulate as non-contiguous
+        # blocks in PyTorch's caching allocator (10+ GB reserved but
+        # unallocated), causing the NEXT large allocation to fail even though
+        # total free memory would be sufficient.  empty_cache() returns those
+        # blocks to the OS after each sample so the next sample gets a fresh
+        # contiguous pool.
+        torch.cuda.empty_cache()
 
     res = {
         "log_probs": log_probs_list,

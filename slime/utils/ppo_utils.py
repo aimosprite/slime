@@ -661,12 +661,17 @@ def calculate_log_probs_and_entropy(logits, tokens, tp_group, with_entropy: bool
             for tokens_chunk, logits_chunk in zip(tokens_chunks, logits_chunks, strict=True):
                 log_prob = compute_log_probs(logits_chunk.clone(), tokens_chunk, tp_group)
                 log_probs.append(log_prob)
+                # Defragment cache between chunks: fused_cross_entropy converts to FP32
+                # (chunk_size × 151936 × 4 bytes). Without this, freed FP32 blocks from
+                # previous chunks stay in PyTorch cache and OOM the next chunk.
+                torch.cuda.empty_cache()
             log_prob = torch.cat(log_probs, dim=0)
             if with_entropy:
                 entropys = []
                 for _, logits_chunk in zip(tokens_chunks, logits_chunks, strict=True):
                     entropy = compute_entropy_from_logits(logits_chunk.clone(), tp_group)
                     entropys.append(entropy)
+                    torch.cuda.empty_cache()
                 entropy = torch.cat(entropys, dim=0)
         else:
             log_prob = compute_log_probs(logits.clone(), tokens, tp_group)
