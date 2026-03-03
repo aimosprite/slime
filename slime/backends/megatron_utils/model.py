@@ -366,6 +366,15 @@ def train_one_step(
             (loss, num_elems, {"keys": list[str], "values": torch.Tensor}).
         """
 
+        # Defragment PyTorch cache before each microbatch's forward+backward pass.
+        # During training, PyTorch accumulates "reserved but unallocated" blocks (3+ GB)
+        # from previous operations (compute_log_prob, etc.). When the loss function then
+        # tries to allocate a 2.32 GB FP32 logit chunk, torch_memory_saver's margin check
+        # (alloc_size + margin > CUDA_free) fails even though the pool has enough total
+        # space. Calling empty_cache() at the start of each forward_step returns all freed
+        # blocks to CUDA so torch_memory_saver sees more free space and allows the allocation.
+        torch.cuda.empty_cache()
+
         # Get the batch.
         batch = get_batch(
             data_iterator,
