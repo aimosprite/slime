@@ -1049,12 +1049,25 @@ if [ "${USE_COLOCATE}" = "1" ]; then
    RAY_JOB_ARGS+=(--colocate)
 fi
 
+# Detect NVLink presence for NCCL_NVLS_ENABLE (matches command_utils.py logic).
+# Override with NCCL_NVLS_ENABLE=0 if you see "NCCL Error 1: unhandled cuda error".
+if [ -z "${NCCL_NVLS_ENABLE+x}" ]; then
+    NCCL_NVLS_ENABLE=0
+    if nvidia-smi topo -m 2>/dev/null | grep -qo 'NV[0-9][0-9]*'; then
+        NCCL_NVLS_ENABLE=1
+    fi
+fi
+
 set +e
 ray job submit --address="http://${RAY_HEAD_IP}:${RAY_DASHBOARD_PORT}" \
    --runtime-env-json="{
      \"env_vars\": {
         \"PYTHONPATH\": \"${MEGATRON_PATH}\",
-        \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\"
+        \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
+        \"NCCL_NVLS_ENABLE\": \"${HAS_NVLINK}\",
+        \"NCCL_DEBUG\": \"${NCCL_DEBUG:-WARN}\",
+        \"MASTER_ADDR\": \"${MASTER_ADDR}\",
+        \"SLIME_HOST_IP\": \"${SLIME_HOST_IP:-}\"
      }
    }" \
    -- env CUDA_VISIBLE_DEVICES="${RAY_DRIVER_VISIBLE_GPU}" python3 "${REPO_DIR}/train.py" \
