@@ -37,7 +37,12 @@ async def async_rm(args, sample: Sample, **kwargs):
     response = sample.response
     label = sample.label
     if rm_type.startswith("boxed_"):
-        response = extract_boxed_answer(response) or ""
+        # Extract the last \boxed{...} answer from the response, then wrap it
+        # in "Answer: <extracted>" so that the downstream compute_score_dapo →
+        # is_correct_minerva can find the answer via its "Answer:" regex pattern.
+        # Without the "Answer: " wrapper, is_correct_minerva returns [INVALID].
+        extracted = extract_boxed_answer(response)
+        response = f"Answer: {extracted}" if extracted is not None else ""
         rm_type = rm_type[len("boxed_") :]
 
     # This function is intended for remote or time-consuming reward model evaluation.
