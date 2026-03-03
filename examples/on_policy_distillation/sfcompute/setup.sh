@@ -268,10 +268,9 @@ else
     fi
     if [ "${MODE}" = "teacher" ] && [[ "${CLUSTER_NUM_NODES:-1}" =~ ^[0-9]+$ ]] && [ "${CLUSTER_NUM_NODES:-1}" -gt 1 ]; then
         echo ""
-        echo "Waiting for student worker startup."
-        echo "Run this on the student node first, then come back:"
+        echo "Start the student worker on the other node (now or while teacher sets up):"
         echo "  RAY_PORT=${RAY_PORT} bash examples/on_policy_distillation/sfcompute/setup.sh student ${RAY_HEAD_IP}"
-        read -rp "Press Enter once student worker is running... " _
+        echo "Training will wait for workers after Ray head starts."
     fi
     launch_training
 fi

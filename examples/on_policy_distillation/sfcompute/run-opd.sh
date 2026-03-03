@@ -18,7 +18,8 @@ for line in open(sys.argv[1]):
         k, v = m.group(1).upper(), m.group(2).strip()
         if k not in os.environ:
             print(f"export {k}='{v}'")
-PYEOF)"
+PYEOF
+)"
 fi
 
 DEFAULT_CONFIG_FILE="${SCRIPT_DIR}/config-16xh100.env"
@@ -994,8 +995,50 @@ MISC_ARGS=(
    --train-memory-margin-bytes "${TRAIN_MEMORY_MARGIN_BYTES}"
 )
 
+# Clean up any lingering processes from previous runs
+pkill -9 -f "python3.*train.py" 2>/dev/null || true
+pkill -9 -f "torchrun" 2>/dev/null || true
+pkill -9 -f "python3 -m sglang.launch_server" 2>/dev/null || true
+sleep 1
 ray stop --force 2>/dev/null || true
 CUDA_VISIBLE_DEVICES="${RAY_VISIBLE_GPUS}" ray start --head --node-ip-address "${RAY_HEAD_IP}" --num-gpus "${RAY_NUM_GPUS}" --port "${RAY_PORT}" --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port="${RAY_DASHBOARD_PORT}"
+
+# In multi-node setup, wait for worker GPUs before submitting training job
+if [ "${CLUSTER_NUM_NODES}" -gt 1 ] && [ "${ACTOR_NUM_NODES}" -gt 0 ]; then
+    EXPECTED_WORKER_GPUS=$(( ACTOR_NUM_NODES * NUM_GPUS ))
+    echo ""
+    echo "========================================="
+    echo "Ray head is up at ${RAY_HEAD_IP}:${RAY_PORT}"
+    echo "Waiting for ${EXPECTED_WORKER_GPUS} worker GPUs..."
+    echo ""
+    echo "If not started yet, run on the student node:"
+    echo "  RAY_PORT=${RAY_PORT} bash examples/on_policy_distillation/sfcompute/setup.sh student ${RAY_HEAD_IP}"
+    echo "========================================="
+    MAX_WORKER_WAIT_SEC="${MAX_WORKER_WAIT_SEC:-900}"
+    worker_waited_sec=0
+    while true; do
+        current_gpus="$(python3 -c "
+import ray
+try:
+    ray.init(address='auto', ignore_reinit_error=True)
+    print(int(ray.cluster_resources().get('GPU', 0)))
+    ray.shutdown()
+except Exception:
+    print(0)
+" 2>/dev/null || echo 0)"
+        if [ "${current_gpus}" -ge "${EXPECTED_WORKER_GPUS}" ]; then
+            echo "All ${EXPECTED_WORKER_GPUS} worker GPUs connected!"
+            break
+        fi
+        if [ "${worker_waited_sec}" -ge "${MAX_WORKER_WAIT_SEC}" ]; then
+            echo "WARNING: Only ${current_gpus}/${EXPECTED_WORKER_GPUS} GPUs after ${MAX_WORKER_WAIT_SEC}s. Proceeding anyway."
+            break
+        fi
+        echo "  GPUs: ${current_gpus}/${EXPECTED_WORKER_GPUS} (${worker_waited_sec}s elapsed)"
+        sleep 15
+        worker_waited_sec=$((worker_waited_sec + 15))
+    done
+fi
 
 RAY_JOB_ARGS=(
    --actor-num-nodes "${ACTOR_NUM_NODES}"
