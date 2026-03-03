@@ -244,6 +244,16 @@ else
     echo "=== WandB DISABLED (invalid or missing key) ==="
 fi
 
+EVAL_HOOK_ARGS=()
+if [ -n "${TEST_DATA_PATH:-}" ] && [ -f "${TEST_DATA_PATH}" ]; then
+    EVAL_HOOK_ARGS=(
+        --custom-megatron-before-train-step-hook-path slime.hooks.eval_hook.eval_before_step
+    )
+    echo "=== Test-loss eval hook ENABLED (every ${EVAL_INTERVAL:-50} steps) ==="
+else
+    echo "=== Test-loss eval hook DISABLED (TEST_DATA_PATH not set or file missing) ==="
+fi
+
 MISC_ARGS=(
     --attention-dropout             "${ATTENTION_DROPOUT}"
     --hidden-dropout                "${HIDDEN_DROPOUT}"
@@ -272,7 +282,10 @@ RUNTIME_ENV_JSON="{
     \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
     \"NCCL_NVLS_ENABLE\":          \"${HAS_NVLINK}\",
     \"NCCL_CUMEM_ENABLE\":         \"0\",
-    \"PYTORCH_CUDA_ALLOC_CONF\":   \"expandable_segments:True\"
+    \"PYTORCH_CUDA_ALLOC_CONF\":   \"expandable_segments:True\",
+    \"TEST_DATA_PATH\":            \"${TEST_DATA_PATH:-}\",
+    \"EVAL_INTERVAL\":             \"${EVAL_INTERVAL:-50}\",
+    \"EVAL_BATCH_SIZE\":           \"${EVAL_BATCH_SIZE:-32}\"
   }
 }"
 
@@ -288,4 +301,5 @@ ray job submit --address="http://127.0.0.1:8265" \
     "${OPTIMIZER_ARGS[@]}" \
     "${WANDB_ARGS[@]}" \
     "${PERF_ARGS[@]}" \
-    "${MISC_ARGS[@]}"
+    "${MISC_ARGS[@]}" \
+    "${EVAL_HOOK_ARGS[@]}"
