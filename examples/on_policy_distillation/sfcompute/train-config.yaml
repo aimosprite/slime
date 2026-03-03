@@ -47,8 +47,12 @@ gpus_per_node: 8
 # - teacher_ip: URL host used by workers to reach teacher sglang.
 #   Usually same as ray_head_ip.
 # For multi-node, set these explicitly to node-1 reachable IP.
+# If Tailscale is installed, setup auto-detects the node's Tailscale IPv4.
 # ray_head_ip: 10.x.x.x
 # teacher_ip: 10.x.x.x
+# ray_port: 6379
+# ray_dashboard_port: 8265
+# teacher_port: 13141
 
 # Ray/local student GPUs:
 # - auto: cluster-aware default (none on multi-node head; 0..num_gpus-1 on single-node)

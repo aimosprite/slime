@@ -300,6 +300,14 @@ first_csv_item() {
     echo "${items[0]}"
 }
 detect_primary_ip() {
+    if command -v tailscale >/dev/null 2>&1; then
+        local ts_ip
+        ts_ip="$(tailscale ip -4 2>/dev/null | awk 'NF {print; exit}' || true)"
+        if [ -n "${ts_ip}" ]; then
+            echo "${ts_ip}"
+            return 0
+        fi
+    fi
     python3 - <<'PY'
 import socket
 ip = "127.0.0.1"
@@ -419,6 +427,8 @@ if [ -z "${TRAIN_MEMORY_MARGIN_BYTES+x}" ] || [ -z "${TRAIN_MEMORY_MARGIN_BYTES}
     fi
 fi
 TEACHER_PORT="${TEACHER_PORT:-13141}"
+RAY_PORT="${RAY_PORT:-6379}"
+RAY_DASHBOARD_PORT="${RAY_DASHBOARD_PORT:-8265}"
 TEACHER_MEM_FRACTION="${TEACHER_MEM_FRACTION:-0.75}"
 SGLANG_MEM_FRACTION_STATIC="${SGLANG_MEM_FRACTION_STATIC:-0.6}"
 if [ -z "${RAY_HEAD_IP+x}" ] || [ -z "${RAY_HEAD_IP}" ]; then
@@ -985,7 +995,7 @@ MISC_ARGS=(
 )
 
 ray stop --force 2>/dev/null || true
-CUDA_VISIBLE_DEVICES="${RAY_VISIBLE_GPUS}" ray start --head --node-ip-address "${RAY_HEAD_IP}" --num-gpus "${RAY_NUM_GPUS}" --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
+CUDA_VISIBLE_DEVICES="${RAY_VISIBLE_GPUS}" ray start --head --node-ip-address "${RAY_HEAD_IP}" --num-gpus "${RAY_NUM_GPUS}" --port "${RAY_PORT}" --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port="${RAY_DASHBOARD_PORT}"
 
 RAY_JOB_ARGS=(
    --actor-num-nodes "${ACTOR_NUM_NODES}"
@@ -997,7 +1007,7 @@ if [ "${USE_COLOCATE}" = "1" ]; then
 fi
 
 set +e
-ray job submit --address="http://${RAY_HEAD_IP}:8265" \
+ray job submit --address="http://${RAY_HEAD_IP}:${RAY_DASHBOARD_PORT}" \
    --runtime-env-json="{
      \"env_vars\": {
         \"PYTHONPATH\": \"${MEGATRON_PATH}\",

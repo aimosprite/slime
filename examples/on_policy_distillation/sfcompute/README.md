@@ -11,7 +11,7 @@ Current defaults in `train-config.yaml` are for a 2-node run:
 
 ## Two-node quickstart (frictionless)
 
-### 1) SSH into both nodes and clone repo
+### 1) SSH into both nodes, clone repo, set up Tailscale
 
 On **both nodes**:
 
@@ -19,6 +19,16 @@ On **both nodes**:
 cd ~
 git clone -b rohin/opd-sfcompute https://github.com/aimosprite/slime.git
 cd ~/slime
+
+curl -fsSL https://tailscale.com/install.sh | sh  
+sudo tailscale up
+```
+
+Optional sanity check on each node (recommended):
+
+```bash
+tailscale status
+tailscale ip -4
 ```
 
 ### 2) Start teacher/head role on Node A
@@ -29,7 +39,7 @@ On **Node A**:
 bash examples/on_policy_distillation/sfcompute/setup.sh teacher
 ```
 
-This does everything for head mode: installs tooling, auto-detects the node IP, writes it into `train-config.yaml` (`ray_head_ip` + `teacher_ip`), creates `.env` if needed, and launches OPD training.
+This does everything for head mode: installs tooling, auto-detects the node IP (prefers Tailscale IPv4 when available), writes it into `train-config.yaml` (`ray_head_ip` + `teacher_ip`), creates `.env` if needed, and launches OPD training.
 
 It also prints the exact student command to run.
 For 2-node configs, it pauses and asks you to press Enter after the student worker is up.
@@ -43,6 +53,12 @@ bash examples/on_policy_distillation/sfcompute/setup.sh student <NODE_A_IP>
 ```
 
 This does everything for worker mode: installs Docker/tooling if needed, pulls image, and starts a blocking Ray worker in Docker connected to the teacher/head IP.
+
+If you set a non-default Ray port on Node A, pass it in on Node B too:
+
+```bash
+RAY_PORT=6379 bash examples/on_policy_distillation/sfcompute/setup.sh student <NODE_A_IP>
+```
 
 Use tmux on both nodes if desired:
 
@@ -61,6 +77,23 @@ Detach with `Ctrl-b d`, reattach with `tmux attach -t opd`.
 5. Launches role:
    - `teacher`/`single` -> `docker-run.sh train`
    - `student <teacher_ip>` -> `docker-run.sh worker` (joins Ray cluster and blocks)
+
+## Tailscale + ports defaults
+
+Defaults now work out-of-the-box for Tailscale-connected nodes:
+
+- `setup.sh teacher` picks Tailscale IPv4 first (`tailscale ip -4`) for `ray_head_ip` and `teacher_ip`.
+- `setup.sh student <teacher_ip>` joins Ray at `RAY_PORT` (default `6379`).
+- `run-opd.sh` starts Ray head on:
+  - `RAY_PORT` (default `6379`)
+  - dashboard `RAY_DASHBOARD_PORT` (default `8265`)
+- Teacher sglang server listens on `TEACHER_PORT` (default `13141`).
+
+If you changed firewall/Tailscale ACL policy, ensure worker node can reach Node A on:
+
+- `6379/tcp` (or your `RAY_PORT`)
+- `8265/tcp` (or your `RAY_DASHBOARD_PORT`)
+- `13141/tcp` (or your `TEACHER_PORT`)
 
 ## Commands summary
 

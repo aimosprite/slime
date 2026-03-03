@@ -91,6 +91,14 @@ pull_image() {
 
 # ── Helpers for role-based launch ────────────────────────────────────
 detect_primary_ip() {
+    local ip=""
+    if command -v tailscale >/dev/null 2>&1; then
+        ip="$(tailscale ip -4 2>/dev/null | awk 'NF {print; exit}' || true)"
+        if [ -n "${ip}" ]; then
+            echo "${ip}"
+            return 0
+        fi
+    fi
     python3 - <<'PY'
 import socket
 ip = "127.0.0.1"
@@ -211,6 +219,7 @@ launch_worker() {
     echo "========================================="
     echo "Setup complete. Starting Ray worker..."
     echo "  RAY_HEAD_IP=${RAY_HEAD_IP}"
+    echo "  RAY_PORT=${RAY_PORT}"
     echo "  GPUS_PER_NODE=${GPUS_PER_NODE}"
     echo "========================================="
     exec bash "${SCRIPT_DIR}/docker-run.sh" worker
@@ -243,23 +252,25 @@ if [ "${MODE}" = "student" ]; then
     launch_worker
 else
     create_dotenv
+    export RAY_PORT="${RAY_PORT:-6379}"
+    export RAY_DASHBOARD_PORT="${RAY_DASHBOARD_PORT:-8265}"
     if [ "${MODE}" = "teacher" ] && { [ -z "${RAY_HEAD_IP:-}" ] || [ "${RAY_HEAD_IP}" = "127.0.0.1" ]; }; then
         export RAY_HEAD_IP="$(detect_primary_ip)"
         export TEACHER_IP="${TEACHER_IP:-${RAY_HEAD_IP}}"
         echo "Auto-detected RAY_HEAD_IP=${RAY_HEAD_IP}"
         write_train_config_ips "${RAY_HEAD_IP}" || true
         echo "Run this on the student node:"
-        echo "  bash examples/on_policy_distillation/sfcompute/setup.sh student ${RAY_HEAD_IP}"
+        echo "  RAY_PORT=${RAY_PORT} bash examples/on_policy_distillation/sfcompute/setup.sh student ${RAY_HEAD_IP}"
     elif [ "${MODE}" = "teacher" ]; then
         write_train_config_ips "${RAY_HEAD_IP}" || true
         echo "Run this on the student node:"
-        echo "  bash examples/on_policy_distillation/sfcompute/setup.sh student ${RAY_HEAD_IP}"
+        echo "  RAY_PORT=${RAY_PORT} bash examples/on_policy_distillation/sfcompute/setup.sh student ${RAY_HEAD_IP}"
     fi
     if [ "${MODE}" = "teacher" ] && [[ "${CLUSTER_NUM_NODES:-1}" =~ ^[0-9]+$ ]] && [ "${CLUSTER_NUM_NODES:-1}" -gt 1 ]; then
         echo ""
         echo "Waiting for student worker startup."
         echo "Run this on the student node first, then come back:"
-        echo "  bash examples/on_policy_distillation/sfcompute/setup.sh student ${RAY_HEAD_IP}"
+        echo "  RAY_PORT=${RAY_PORT} bash examples/on_policy_distillation/sfcompute/setup.sh student ${RAY_HEAD_IP}"
         read -rp "Press Enter once student worker is running... " _
     fi
     launch_training
