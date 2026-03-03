@@ -86,9 +86,33 @@ case "${COMMAND}" in
             -e RAY_HEAD_IP="${RAY_HEAD_IP:-}" \
             -e GPUS_PER_NODE="${GPUS_PER_NODE:-8}" \
             -e RAY_PORT="${RAY_PORT:-6379}" \
+            -e HF_TOKEN="${HF_TOKEN}" \
+            -e PREP_WORKER_ONLY=1 \
             -w /root/slime \
             "${IMAGE}" \
-            bash -lc 'set -euo pipefail; if [ -z "${RAY_HEAD_IP:-}" ] || [ "${RAY_HEAD_IP}" = "127.0.0.1" ]; then echo "Set RAY_HEAD_IP to the reachable head-node IP before starting worker."; exit 1; fi; ray stop --force || true; echo "Connecting to Ray head at ${RAY_HEAD_IP}:${RAY_PORT} (will retry up to 10 min)..."; for attempt in $(seq 1 40); do if ray start --address "${RAY_HEAD_IP}:${RAY_PORT}" --num-gpus "${GPUS_PER_NODE}" --disable-usage-stats --block; then exit 0; fi; echo "  Attempt ${attempt}/40 failed, retrying in 15s..."; ray stop --force 2>/dev/null || true; sleep 15; done; echo "Failed to connect to Ray head."; exit 1'
+            bash -lc 'set -euo pipefail
+if [ -z "${RAY_HEAD_IP:-}" ] || [ "${RAY_HEAD_IP}" = "127.0.0.1" ]; then
+    echo "Set RAY_HEAD_IP to the reachable head-node IP before starting worker."
+    exit 1
+fi
+
+# Download student model + convert to Megatron format (skips dataset + teacher)
+echo "=== Worker prep: ensuring student model is ready ==="
+PREP_WORKER_ONLY=1 bash examples/on_policy_distillation/sfcompute/prep-opd.sh
+
+# Join Ray cluster with retries
+ray stop --force || true
+echo "Connecting to Ray head at ${RAY_HEAD_IP}:${RAY_PORT} (will retry up to 10 min)..."
+for attempt in $(seq 1 40); do
+    if ray start --address "${RAY_HEAD_IP}:${RAY_PORT}" --num-gpus "${GPUS_PER_NODE}" --disable-usage-stats --block; then
+        exit 0
+    fi
+    echo "  Attempt ${attempt}/40 failed, retrying in 15s..."
+    ray stop --force 2>/dev/null || true
+    sleep 15
+done
+echo "Failed to connect to Ray head."
+exit 1'
         ;;
     preflight)
         docker run --rm --gpus all --ipc=host \

@@ -16,7 +16,8 @@ for line in open(sys.argv[1]):
         k, v = m.group(1).upper(), m.group(2).strip()
         if k not in os.environ:
             print(f"export {k}='{v}'")
-PYEOF)"
+PYEOF
+)"
 fi
 
 DEFAULT_CONFIG_FILE="${SCRIPT_DIR}/config-16xh100.env"
@@ -246,34 +247,38 @@ fi
 
 mkdir -p "${POOL_DIR}"
 
-DATA_DIR="${POOL_DIR}/${DATASET_SHORT}"
-DATA_JSONL="${DATA_DIR}/${DATASET_SHORT}.jsonl"
-TRAIN_JSONL="${DATA_DIR}/${DATASET_SHORT}-train.jsonl"
-EVAL_JSONL="${DATA_DIR}/${DATASET_SHORT}-eval.jsonl"
+# PREP_WORKER_ONLY=1 skips dataset + teacher download (worker nodes only need student model).
+PREP_WORKER_ONLY="${PREP_WORKER_ONLY:-0}"
 
-# Download the dataset from HuggingFace if no parquet files exist locally.
-FOUND_PARQUET="$(find "${DATA_DIR}" -name '*.parquet' 2>/dev/null | head -1 || true)"
-if [ -z "${FOUND_PARQUET}" ]; then
-    echo "Downloading dataset ${DATASET}..."
-    mkdir -p "${DATA_DIR}"
-    hf_download "${DATASET}" \
-        --repo-type dataset \
-        --local-dir "${DATA_DIR}"
-fi
+if [ "${PREP_WORKER_ONLY}" != "1" ]; then
+    DATA_DIR="${POOL_DIR}/${DATASET_SHORT}"
+    DATA_JSONL="${DATA_DIR}/${DATASET_SHORT}.jsonl"
+    TRAIN_JSONL="${DATA_DIR}/${DATASET_SHORT}-train.jsonl"
+    EVAL_JSONL="${DATA_DIR}/${DATASET_SHORT}-eval.jsonl"
 
-# Locate the first parquet file in the downloaded directory.
-PARQUET_INPUT="$(find "${DATA_DIR}" -name '*.parquet' 2>/dev/null | head -1 || true)"
-if [ -z "${PARQUET_INPUT}" ]; then
-    echo "No .parquet file found in ${DATA_DIR} after download."
-    echo "Check that dataset '${DATASET}' exists on HuggingFace."
-    exit 1
-fi
-echo "Using parquet: ${PARQUET_INPUT}"
+    # Download the dataset from HuggingFace if no parquet files exist locally.
+    FOUND_PARQUET="$(find "${DATA_DIR}" -name '*.parquet' 2>/dev/null | head -1 || true)"
+    if [ -z "${FOUND_PARQUET}" ]; then
+        echo "Downloading dataset ${DATASET}..."
+        mkdir -p "${DATA_DIR}"
+        hf_download "${DATASET}" \
+            --repo-type dataset \
+            --local-dir "${DATA_DIR}"
+    fi
 
-if [ ! -f "${DATA_JSONL}" ] && [ ! -f "${TRAIN_JSONL}" ]; then
-    echo "Converting dataset parquet to JSONL with train/eval split..."
-    PARQUET_INPUT="${PARQUET_INPUT}" DATA_JSONL="${DATA_JSONL}" \
-    TRAIN_JSONL="${TRAIN_JSONL}" EVAL_JSONL="${EVAL_JSONL}" python3 - <<'PY'
+    # Locate the first parquet file in the downloaded directory.
+    PARQUET_INPUT="$(find "${DATA_DIR}" -name '*.parquet' 2>/dev/null | head -1 || true)"
+    if [ -z "${PARQUET_INPUT}" ]; then
+        echo "No .parquet file found in ${DATA_DIR} after download."
+        echo "Check that dataset '${DATASET}' exists on HuggingFace."
+        exit 1
+    fi
+    echo "Using parquet: ${PARQUET_INPUT}"
+
+    if [ ! -f "${DATA_JSONL}" ] && [ ! -f "${TRAIN_JSONL}" ]; then
+        echo "Converting dataset parquet to JSONL with train/eval split..."
+        PARQUET_INPUT="${PARQUET_INPUT}" DATA_JSONL="${DATA_JSONL}" \
+        TRAIN_JSONL="${TRAIN_JSONL}" EVAL_JSONL="${EVAL_JSONL}" python3 - <<'PY'
 import os
 import pandas as pd
 
@@ -300,19 +305,22 @@ else:
     eval_df.to_json(eval_jsonl, orient="records", lines=True)
     print(f"Split: {len(train_df)} train, {len(eval_df)} eval")
 PY
-else
-    echo "Dataset JSONL already exists, skipping conversion."
-fi
-
-if [ ! -d "${TEACHER_PATH}" ]; then
-    if [[ "${TEACHER_MODEL}" == /* ]]; then
-        echo "Teacher model path not found: ${TEACHER_PATH}"
-        exit 1
+    else
+        echo "Dataset JSONL already exists, skipping conversion."
     fi
-    echo "Downloading ${TEACHER_SHORT} (teacher)..."
-    hf_download "${TEACHER_MODEL}" --local-dir "${TEACHER_PATH}"
+
+    if [ ! -d "${TEACHER_PATH}" ]; then
+        if [[ "${TEACHER_MODEL}" == /* ]]; then
+            echo "Teacher model path not found: ${TEACHER_PATH}"
+            exit 1
+        fi
+        echo "Downloading ${TEACHER_SHORT} (teacher)..."
+        hf_download "${TEACHER_MODEL}" --local-dir "${TEACHER_PATH}"
+    else
+        echo "Teacher model (${TEACHER_PATH}) already exists, skipping download."
+    fi
 else
-    echo "Teacher model (${TEACHER_PATH}) already exists, skipping download."
+    echo "Worker-only prep: skipping dataset and teacher model download."
 fi
 
 if [ ! -d "${STUDENT_PATH}" ]; then
