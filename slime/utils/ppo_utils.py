@@ -667,6 +667,11 @@ def calculate_log_probs_and_entropy(logits, tokens, tp_group, with_entropy: bool
                 torch.cuda.empty_cache()
             log_prob = torch.cat(log_probs, dim=0)
             if with_entropy:
+                # Flush freed log_probs blocks before starting entropy computation.
+                # The log_probs loop above freed FP32 chunks. Even with per-chunk
+                # empty_cache(), some freed blocks may remain. Clearing here ensures
+                # the full budget is available for the first entropy chunk's clone().
+                torch.cuda.empty_cache()
                 entropys = []
                 for _, logits_chunk in zip(tokens_chunks, logits_chunks, strict=True):
                     entropy = compute_entropy_from_logits(logits_chunk.clone(), tp_group)
