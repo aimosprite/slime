@@ -65,6 +65,9 @@ case "${COMMAND}" in
             bash examples/on_policy_distillation/sfcompute/prep-opd.sh "$@"
         ;;
     train)
+        # SLIME_HOST_IP tells slime's router/engines to use this IP instead of auto-detect.
+        # Critical for Tailscale setups where the auto-detected LAN IP isn't reachable cross-node.
+        SLIME_HOST_IP="${SLIME_HOST_IP:-${RAY_HEAD_IP:-}}"
         docker run --rm --gpus all --network host --ipc=host --shm-size=64g \
             --ulimit memlock=-1 --ulimit stack=67108864 \
             -v "${REPO_DIR}:/root/slime" \
@@ -73,6 +76,7 @@ case "${COMMAND}" in
             -e HF_TOKEN="${HF_TOKEN}" \
             -e WANDB_API_KEY="${WANDB_API_KEY}" \
             -e CHECKPOINT_HF_REPO_ID="${CHECKPOINT_HF_REPO_ID:-}" \
+            -e SLIME_HOST_IP="${SLIME_HOST_IP}" \
             -w /root/slime \
             "${IMAGE}" \
             bash examples/on_policy_distillation/sfcompute/run-opd.sh "$@"

@@ -120,6 +120,11 @@ bash examples/on_policy_distillation/sfcompute/setup.sh student <NODE_A_IP>
 | `config-16xh100.env` | Configurable paths and GPU layout (2 nodes x 8 H100) |
 | `train-config.yaml` | Training hyperparameters (save/eval cadence, optimizer, checkpoint shipping) |
 
+## To clean up dead runs
+```bash
+docker kill $(docker ps -q) 2>/dev/null; pkill -9 -f torchrun; pkill -9 -f sglang; pkill -9 ray
+```
+
 ## Hugging Face auth
 
 - `.env` `HF_TOKEN` is the primary auth source — scripts authenticate automatically.
@@ -144,6 +149,7 @@ Note: the preflight requires Docker and a `.env` with your `HF_TOKEN`, so you ca
 1. Run `bash sfacquire.sh` from the aimo repo, answer all the questions (make sure that pass_along_node_to_setup.sh exists)
 2. Do `sf nodes ssh root@...` based on whatever node you have there
     - If that doesn't work, try [this](https://discord.com/channels/1447431405788463157/1461129003896410282/1476321257203957991)
+
 
 ## Single-node runbook (legacy/simple)
 
