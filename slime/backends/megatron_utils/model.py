@@ -204,6 +204,18 @@ def forward_only(
 
         assert not return_schedule_plan, "forward_only step should never return schedule plan"
 
+        # Defragment PyTorch cache before each microbatch's forward pass.
+        # Each microbatch allocates a large FP32 logit tensor (e.g., 4096 × 151936 × 4 = 2.46 GB
+        # for chunk_size=4096). After the previous microbatch's loss_func() processes the logit
+        # and returns, the logit is freed in Python but stays in PyTorch's CUDA cache as a
+        # "reserved-but-unallocated" block. With ~39 microbatches per compute_log_prob call,
+        # these freed blocks accumulate (N × 2.46 GB) and fragment the cache, preventing the
+        # next microbatch from reusing them for its own logit allocation. This causes OOM on
+        # iteration 2+ (where optimizer states also occupy GPU memory). Calling empty_cache()
+        # at the START of each forward_step returns all freed blocks to CUDA so the next
+        # forward pass gets a fresh contiguous pool.
+        torch.cuda.empty_cache()
+
         # Get the batch.
         batch = get_batch(
             data_iterator,
