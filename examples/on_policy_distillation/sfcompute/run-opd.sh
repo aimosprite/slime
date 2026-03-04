@@ -1058,6 +1058,29 @@ if [ -z "${NCCL_NVLS_ENABLE+x}" ]; then
     fi
 fi
 
+# In multi-node Tailscale setups, NCCL/Gloo may pick the tailscale0 TUN interface for
+# socket bootstrap, which causes CUDA IPC / NCCL errors even for intra-node communication.
+# Force NCCL and Gloo to use a standard interface. These propagate to actor processes
+# via --train-env-vars (which feeds into self.args.train_env_vars in actor_group.py).
+TRAIN_NCCL_ENV="{}"
+if [ "${CLUSTER_NUM_NODES}" -gt 1 ]; then
+    # Detect a non-tailscale interface for NCCL socket comms.
+    NCCL_IF="${NCCL_SOCKET_IFNAME:-}"
+    if [ -z "${NCCL_IF}" ]; then
+        for iface in eth0 ens0 eno1 bond0; do
+            if ip link show "${iface}" >/dev/null 2>&1; then
+                NCCL_IF="${iface}"
+                break
+            fi
+        done
+    fi
+    # Fall back to loopback if nothing else found (all actors are on same node).
+    NCCL_IF="${NCCL_IF:-lo}"
+    echo "Multi-node NCCL socket interface: ${NCCL_IF}"
+
+    TRAIN_NCCL_ENV="{\"NCCL_SOCKET_IFNAME\":\"${NCCL_IF}\",\"GLOO_SOCKET_IFNAME\":\"${NCCL_IF}\",\"NCCL_IB_DISABLE\":\"1\",\"NCCL_NVLS_ENABLE\":\"${NCCL_NVLS_ENABLE}\",\"NCCL_DEBUG\":\"${NCCL_DEBUG:-WARN}\"}"
+fi
+
 set +e
 ray job submit --address="http://${RAY_HEAD_IP}:${RAY_DASHBOARD_PORT}" \
    --runtime-env-json="{
@@ -1082,7 +1105,8 @@ ray job submit --address="http://${RAY_HEAD_IP}:${RAY_DASHBOARD_PORT}" \
    "${EVAL_ARGS[@]}" \
    "${SGLANG_ARGS[@]}" \
    "${MISC_ARGS[@]}" \
-   "${RM_ARGS[@]}"
+   "${RM_ARGS[@]}" \
+   --train-env-vars "${TRAIN_NCCL_ENV}"
 RAY_EXIT_CODE=$?
 set -e
 
