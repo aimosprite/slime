@@ -1064,7 +1064,7 @@ ray job submit --address="http://${RAY_HEAD_IP}:${RAY_DASHBOARD_PORT}" \
      \"env_vars\": {
         \"PYTHONPATH\": \"${MEGATRON_PATH}\",
         \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
-        \"NCCL_NVLS_ENABLE\": \"${HAS_NVLINK}\",
+        \"NCCL_NVLS_ENABLE\": \"${NCCL_NVLS_ENABLE}\",
         \"NCCL_DEBUG\": \"${NCCL_DEBUG:-WARN}\",
         \"MASTER_ADDR\": \"${MASTER_ADDR}\",
         \"SLIME_HOST_IP\": \"${SLIME_HOST_IP:-}\"
