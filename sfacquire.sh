@@ -44,8 +44,12 @@ fi
 read -p "Max price $/node-hour [12.00]: " price
 price=${price:-12.00}
 
+# Name
+read -p "Node name [slime]: " name
+name=${name:-slime}
+
 echo ""
-echo "sf nodes create -n $count -z $zone --duration $duration -p $price --user-data-file $STARTUP_SCRIPT"
+echo "sf nodes create $name -n $count -z $zone --duration $duration -p $price --user-data-file $STARTUP_SCRIPT"
 echo ""
 read -p "Run? [Y/n] " confirm
 confirm=${confirm:-Y}
@@ -54,7 +58,7 @@ if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
     exit 0
 fi
 
-sf nodes create \
+sf nodes create "$name" \
     -n "$count" \
     -z "$zone" \
     --duration "$duration" \
