@@ -1,0 +1,91 @@
+# SFT Embedding Surgery — GPT-OSS-20b with Qwen3.5 tokenizer swap
+# Goal: Replace GPT-OSS tokenizer (201088) with Qwen3.5 tokenizer (248320),
+#       re-init embeddings, freeze transformer, train only embed_tokens + lm_head
+#       on Qwen3.5-35B-A3B distilled rollouts.
+
+experiment_name:    gpt-oss-20b-embedding-surgery-v0
+experiment_version: 0
+
+pool_dir:   /root/slime/models
+hf_model:   openai/gpt-oss-20b
+hf_dataset: aimosprite/qwen3.5-35b-eval-run-20260302
+run_log:    /root/slime/models/run-sft-gpt-oss.log
+
+do_prep:               0  # 1 on first run
+convert_nproc_per_node: 8
+
+# Tokenizer swap config
+donor_tokenizer: Qwen/Qwen3.5-35B-A3B
+new_vocab_size:  248320
+init_std:        0.02
+init_seed:       42
+train_params:    embedding output_layer
+
+# Data config
+input_key:           messages
+loss_mask_type:      qwen3     # Qwen3.5 uses same thinking format as qwen3
+apply_chat_template: 0
+tool_key:            tools
+rollout_shuffle:     1
+rollout_seed:        42
+
+# Sequence length — GPT-OSS rollouts can be long (math reasoning)
+seq_length:              32768
+rollout_max_context_len: 32768
+
+# Training — smaller dataset (~968 correct rollouts) so fewer steps
+num_epoch:          10   # multiple epochs on small dataset
+global_batch_size:  32   # smaller GBS for small dataset
+rollout_batch_size: 64
+micro_batch_size:   1
+save_interval:      50
+
+# Loss
+loss_type:                              sft_loss
+calculate_per_token_loss:               1
+disable_compute_advantages_and_returns: 1
+debug_train_only:                       1
+
+# Optimizer
+optimizer:          adam
+lr:                 5e-4
+min_lr:             1e-5
+lr_decay_style:     cosine
+lr_warmup_fraction: 0.05
+weight_decay:       0.01
+clip_grad:          1.0
+adam_beta1:         0.9
+adam_beta2:         0.95
+
+# Parallelism — GPT-OSS-20b is MoE, but post-dequant ~20B params fit in TP=2
+tensor_model_parallel_size:  2
+pipeline_model_parallel_size: 1
+context_parallel_size:       1
+expert_model_parallel_size:  1
+expert_tensor_parallel_size: 1
+actor_num_nodes:             1
+actor_num_gpus_per_node:     8
+
+# Recompute
+recompute_granularity: full
+recompute_method:      uniform
+recompute_num_layers:  1
+
+# Dropout
+attention_dropout: 0.0
+hidden_dropout:    0.0
+
+# Impl
+transformer_impl:  local
+attention_backend: unfused  # safe default; switch to flash after testing
+
+# Checkpoint shipping
+checkpoint_ship_enabled:   1
+checkpoint_ship_poll_sec:  30
+checkpoint_hf_repo_id:     aimosprite/gpt-oss-20b-embedding-surgery
+checkpoint_hf_private:     0
+checkpoint_hf_create_repo: 1
+
+# WandB
+wandb_project: slime-dev
+wandb_group:   gpt-oss-20b-embedding-surgery

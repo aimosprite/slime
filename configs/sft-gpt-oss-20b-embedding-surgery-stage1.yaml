@@ -1,0 +1,90 @@
+# Stage 1: Pre-train embeddings on AM-Qwen3-Distilled (1.89M traces)
+# Goal: Train embed_tokens + lm_head until test loss approaches original GPT-OSS baseline.
+# After this, proceed to Stage 2 (fine-tune on Qwen3.5 rollouts).
+
+experiment_name:    gpt-oss-20b-embedding-surgery-stage1
+experiment_version: 0
+
+pool_dir:   /root/slime/models
+hf_model:   openai/gpt-oss-20b
+hf_dataset: a-m-team/AM-Qwen3-Distilled
+run_log:    /root/slime/models/run-sft-gpt-oss-stage1.log
+
+do_prep:               0
+convert_nproc_per_node: 1
+
+# Tokenizer swap config
+donor_tokenizer: Qwen/Qwen3.5-35B-A3B
+new_vocab_size:  248320
+init_std:        0.02
+init_seed:       42
+train_params:    embedding output_layer
+
+# Data config
+input_key:           messages
+loss_mask_type:      qwen3
+apply_chat_template: 0
+tool_key:            tools
+rollout_shuffle:     1
+rollout_seed:        42
+
+# Sequence length
+seq_length:              32768
+rollout_max_context_len: 32768
+
+# Training — 1.89M traces, 1 epoch should be enough to learn embeddings
+num_epoch:          1
+global_batch_size:  128
+rollout_batch_size: 256
+micro_batch_size:   1
+save_interval:      100
+
+# Loss
+loss_type:                              sft_loss
+calculate_per_token_loss:               1
+disable_compute_advantages_and_returns: 1
+debug_train_only:                       1
+
+# Optimizer
+optimizer:          adam
+lr:                 5e-4
+min_lr:             1e-5
+lr_decay_style:     cosine
+lr_warmup_fraction: 0.05
+weight_decay:       0.01
+clip_grad:          1.0
+adam_beta1:         0.9
+adam_beta2:         0.95
+
+# Parallelism — TP=2, 8 GPUs → DP=4
+tensor_model_parallel_size:  2
+pipeline_model_parallel_size: 1
+context_parallel_size:       1
+expert_model_parallel_size:  1
+expert_tensor_parallel_size: 1
+actor_num_nodes:             1
+actor_num_gpus_per_node:     8
+
+# Recompute
+recompute_granularity: full
+recompute_method:      uniform
+recompute_num_layers:  1
+
+# Dropout
+attention_dropout: 0.0
+hidden_dropout:    0.0
+
+# Impl
+transformer_impl:  local
+attention_backend: unfused
+
+# Checkpoint shipping
+checkpoint_ship_enabled:   1
+checkpoint_ship_poll_sec:  30
+checkpoint_hf_repo_id:     aimosprite/gpt-oss-20b-embedding-surgery
+checkpoint_hf_private:     0
+checkpoint_hf_create_repo: 1
+
+# WandB
+wandb_project: slime-dev
+wandb_group:   gpt-oss-20b-embedding-surgery-stage1
