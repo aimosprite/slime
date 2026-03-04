@@ -1,6 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 
+if [ "${DEBUG:-0}" = "1" ]; then
+    export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"
+    set -x
+fi
+
 IMAGE="${IMAGE:-slimerl/slime:latest}"
 REPO_DIR="${REPO_DIR:-/root/slime}"
 POOL_DIR="${POOL_DIR:-/root/pool}"
@@ -77,6 +82,8 @@ case "${COMMAND}" in
             -e WANDB_API_KEY="${WANDB_API_KEY}" \
             -e CHECKPOINT_HF_REPO_ID="${CHECKPOINT_HF_REPO_ID:-}" \
             -e SLIME_HOST_IP="${SLIME_HOST_IP}" \
+            -e DEBUG="${DEBUG:-0}" \
+            -e NCCL_DEBUG="${NCCL_DEBUG:-WARN}" \
             -w /root/slime \
             "${IMAGE}" \
             bash examples/on_policy_distillation/sfcompute/run-opd.sh "$@"
@@ -92,6 +99,8 @@ case "${COMMAND}" in
             -e RAY_PORT="${RAY_PORT:-6379}" \
             -e HF_TOKEN="${HF_TOKEN}" \
             -e PREP_WORKER_ONLY=1 \
+            -e DEBUG="${DEBUG:-0}" \
+            -e NCCL_DEBUG="${NCCL_DEBUG:-WARN}" \
             -w /root/slime \
             "${IMAGE}" \
             bash -lc 'set -euo pipefail

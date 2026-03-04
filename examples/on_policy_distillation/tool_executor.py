@@ -192,14 +192,15 @@ class StatefulPythonExecutor:
 # ---------------------------------------------------------------------------
 
 def get_tool_spec() -> dict:
-    """Return the code_interpreter tool spec in OpenAI function-calling format."""
+    """Return the python tool spec in OpenAI function-calling format."""
     return {
         "type": "function",
         "function": {
-            "name": "code_interpreter",
+            "name": "python",
             "description": (
-                "Execute Python code. The interpreter persists state across calls — "
-                "variables, imports, and definitions are retained."
+                "Execute Python code in a stateful session. "
+                "Use print() for outputs. "
+                "Libraries available: math, numpy, sympy, itertools, collections."
             ),
             "parameters": {
                 "type": "object",

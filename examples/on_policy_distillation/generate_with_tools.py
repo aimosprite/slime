@@ -25,10 +25,24 @@ MAX_TOOL_CALLS = 4
 TOOL_TIMEOUT = 30
 TOOL_CONCURRENCY = 32
 
+# "Thinking mode for general tasks" sampling defaults (from Qwen3.5 docs)
+THINKING_GENERAL_SAMPLING_DEFAULTS = {
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "top_k": 20,
+    "min_p": 0.0,
+    "presence_penalty": 1.5,
+    "repetition_penalty": 1.0,
+}
+
 SYSTEM_PROMPT = (
-    "You are a helpful assistant that can use a Python code interpreter to solve problems. "
-    "When you need to perform calculations or verify results, call the code_interpreter tool. "
-    "The interpreter persists state across calls within a conversation."
+    "You are an expert competition mathematician.\n"
+    "Use concise reasoning and avoid repeated prose.\n"
+    "You may call the `python` tool for exact computation.\n"
+    "Use native tool calls only; do not emit literal <tool_call> tags.\n"
+    'When needed, call python with JSON arguments: {"code": "..."}.\n'
+    "Do not hallucinate tool outputs; always wait for tool results.\n"
+    "After finishing computation, provide only the final answer in \\boxed{...}."
 )
 
 
@@ -51,7 +65,7 @@ def parse_tool_call(text: str) -> tuple[str, str] | None:
         obj = json.loads(raw)
         name = obj.get("name", "")
         args = obj.get("arguments", {})
-        if name == "code_interpreter":
+        if name == "python":
             code = args.get("code", "")
             if code.strip():
                 return name, code
@@ -94,6 +108,11 @@ async def generate(args, sample: Sample, sampling_params) -> Sample:
     # Initialise global semaphore once (idempotent after first call)
     get_semaphore(concurrency)
 
+    # Apply "Thinking mode for general tasks" sampling defaults
+    sampling_params = sampling_params.copy()
+    for key, default_val in THINKING_GENERAL_SAMPLING_DEFAULTS.items():
+        sampling_params.setdefault(key, default_val)
+
     state = GenerateState(args)
     tokenizer = state.tokenizer
     url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate"
@@ -105,7 +124,8 @@ async def generate(args, sample: Sample, sampling_params) -> Sample:
         {"role": "user", "content": sample.prompt},
     ]
     prompt_token_ids: list[int] = tokenizer.apply_chat_template(
-        messages, tokenize=True, tools=[tool_spec], add_generation_prompt=True
+        messages, tokenize=True, tools=[tool_spec], add_generation_prompt=True,
+        enable_thinking=True,
     )
 
     response_token_ids: list[int] = []
