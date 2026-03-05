@@ -76,7 +76,7 @@ attention_dropout: 0.0
 hidden_dropout:    0.0
 
 # Impl
-transformer_impl:  local
+transformer_impl:  transformer_engine
 attention_backend: flash
 
 # Checkpoint shipping

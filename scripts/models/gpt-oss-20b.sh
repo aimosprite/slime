@@ -51,7 +51,8 @@ MODEL_ARGS=(
     --moe-aux-loss-coeff 0
 
     # Impl
-    --transformer-impl "${TRANSFORMER_IMPL:-local}"
+    --transformer-impl "${TRANSFORMER_IMPL:-transformer_engine}"
+    --sequence-parallel
     --no-rope-fusion
-    --no-persist-layer-norm
+    --no-bias-swiglu-fusion
 )
