@@ -50,7 +50,7 @@ optimizer:          adam
 lr:                 5e-4
 min_lr:             1e-5
 lr_decay_style:     cosine
-lr_warmup_fraction: 0.05
+lr_warmup_fraction: 0.005
 weight_decay:       0.01
 clip_grad:          1.0
 adam_beta1:         0.9

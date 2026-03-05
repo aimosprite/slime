@@ -59,7 +59,7 @@ def _conv_to_messages(row: dict) -> list[dict] | None:
     return messages
 
 
-def prep_am_dataset(output_dir: Path, test_frac: float, seed: int):
+def prep_am_dataset(output_dir: Path, test_frac: float, seed: int, sample_frac: float = 1.0):
     print("=== AM-Qwen3-Distilled ===")
     cache_dir = output_dir / ".am_jsonl_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -117,9 +117,14 @@ def prep_am_dataset(output_dir: Path, test_frac: float, seed: int):
                     skipped += 1
                     continue
                 total += 1
-                # Deterministic hash-based split
+                # Deterministic hash-based sampling (subsetting)
                 h = int(hashlib.md5(f"{seed}:{total}".encode()).hexdigest(), 16)
-                if (h % 1000) < int(test_frac * 1000):
+                if sample_frac < 1.0 and (h % 10000) >= int(sample_frac * 10000):
+                    skipped += 1
+                    continue
+                # Deterministic hash-based split (use different hash to avoid correlation)
+                h2 = int(hashlib.md5(f"split:{seed}:{total}".encode()).hexdigest(), 16)
+                if (h2 % 1000) < int(test_frac * 1000):
                     test_batch.append(msgs)
                     n_test += 1
                 else:
@@ -197,13 +202,15 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--skip-am", action="store_true", help="Skip AM-Qwen3-Distilled")
     parser.add_argument("--skip-qwen35", action="store_true", help="Skip Qwen3.5 rollouts")
+    parser.add_argument("--sample-fraction", type=float, default=1.0,
+                        help="Fraction of AM dataset to use (0.0-1.0). Hash-based, deterministic.")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if not args.skip_am:
-        am_train, am_test = prep_am_dataset(output_dir, args.test_fraction, args.seed)
+        am_train, am_test = prep_am_dataset(output_dir, args.test_fraction, args.seed, args.sample_fraction)
     if not args.skip_qwen35:
         q35_train, q35_test = prep_qwen35_rollouts(output_dir, args.test_fraction, args.seed)
 
