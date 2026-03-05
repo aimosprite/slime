@@ -29,8 +29,8 @@ rollout_shuffle:     1
 rollout_seed:        42
 
 # Sequence length
-seq_length:              8192
-rollout_max_context_len: 8192
+seq_length:              4096
+rollout_max_context_len: 4096
 
 # Training — 1.89M traces, 1 epoch should be enough to learn embeddings
 num_epoch:          1
