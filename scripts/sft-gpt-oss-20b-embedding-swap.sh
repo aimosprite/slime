@@ -37,7 +37,7 @@ SWAPPED_DIR="${POOL_DIR}/${MODEL_NAME}-qwen3.5-tokenizer"
 MEGATRON_REF_DIR="${POOL_DIR}/${MODEL_NAME}-qwen3.5-tokenizer_torch_dist"
 SLIME_DIR="${POOL_DIR}/${MODEL_NAME}-qwen3.5-tokenizer_slime"
 DATASET_PATH="${DATASET_PATH:-${POOL_DIR}/am-qwen3-distilled-train.parquet}"
-TEST_DATA_PATH="${TEST_DATA_PATH:-${POOL_DIR}/am-qwen3-distilled-test.parquet}"
+TEST_DATA_PATH="${TEST_DATA_PATH:-${POOL_DIR}/am-qwen3-distilled-test.jsonl}"
 
 INIT_STD="${INIT_STD:-0.02}"
 INIT_SEED="${INIT_SEED:-42}"
