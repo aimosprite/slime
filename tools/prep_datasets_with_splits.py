@@ -73,10 +73,35 @@ def prep_am_dataset(output_dir: Path, test_frac: float, seed: int):
         else:
             print(f"  Cached: {fname}")
 
-    # Convert all
-    all_rows = []
-    skipped = 0
+    # Stream convert with hash-based train/test split (memory efficient)
+    import hashlib
+    train_path = str(output_dir / "am-qwen3-distilled-train.parquet")
+    test_path = str(output_dir / "am-qwen3-distilled-test.parquet")
+    train_writer = None
+    test_writer = None
+    train_batch, test_batch = [], []
+    batch_size = 5000
+    total, skipped, n_train, n_test = 0, 0, 0, 0
+
+    def flush_batches():
+        nonlocal train_writer, test_writer, train_batch, test_batch
+        if train_batch:
+            arr = pa.array(train_batch, type=SCHEMA.field("messages").type)
+            t = pa.table({"messages": arr})
+            if train_writer is None:
+                train_writer = pq.ParquetWriter(train_path, SCHEMA)
+            train_writer.write_table(t)
+            train_batch = []
+        if test_batch:
+            arr = pa.array(test_batch, type=SCHEMA.field("messages").type)
+            t = pa.table({"messages": arr})
+            if test_writer is None:
+                test_writer = pq.ParquetWriter(test_path, SCHEMA)
+            test_writer.write_table(t)
+            test_batch = []
+
     for fname in _AM_JSONL_FILES:
+        print(f"  Processing {fname}...", flush=True)
         with open(cache_dir / fname) as f:
             for line in f:
                 line = line.strip()
@@ -91,20 +116,22 @@ def prep_am_dataset(output_dir: Path, test_frac: float, seed: int):
                 if msgs is None:
                     skipped += 1
                     continue
-                all_rows.append(msgs)
-    print(f"  Total: {len(all_rows)} samples, {skipped} skipped")
+                total += 1
+                # Deterministic hash-based split
+                h = int(hashlib.md5(f"{seed}:{total}".encode()).hexdigest(), 16)
+                if (h % 1000) < int(test_frac * 1000):
+                    test_batch.append(msgs)
+                    n_test += 1
+                else:
+                    train_batch.append(msgs)
+                    n_train += 1
+                if len(train_batch) + len(test_batch) >= batch_size:
+                    flush_batches()
 
-    # Split
-    rng = random.Random(seed)
-    rng.shuffle(all_rows)
-    n_test = max(1, int(len(all_rows) * test_frac))
-    test_rows = all_rows[:n_test]
-    train_rows = all_rows[n_test:]
-
-    train_path = str(output_dir / "am-qwen3-distilled-train.parquet")
-    test_path = str(output_dir / "am-qwen3-distilled-test.parquet")
-    write_parquet(train_rows, train_path)
-    write_parquet(test_rows, test_path)
+    flush_batches()
+    if train_writer: train_writer.close()
+    if test_writer: test_writer.close()
+    print(f"  Total: {total} samples, {skipped} skipped, train={n_train}, test={n_test}")
     return train_path, test_path
 
 

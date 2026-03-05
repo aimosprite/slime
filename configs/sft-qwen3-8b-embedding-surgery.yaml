@@ -68,7 +68,7 @@ attention_backend: flash  # flash | unfused; with --transformer-impl local falls
 
 checkpoint_ship_enabled:   1   # upload each saved checkpoint to HF Hub in background
 checkpoint_ship_poll_sec:  30  # polling interval (seconds)
-checkpoint_hf_repo_id:     lerchen3/qwen3-32b-to-8b-embedding-surgery
+checkpoint_hf_repo_id:     aimosprite/qwen3-32b-to-8b-embedding-surgery
 checkpoint_hf_private:     0   # 0 = public
 checkpoint_hf_create_repo: 1   # auto-create repo if not exists
 

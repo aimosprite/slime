@@ -192,7 +192,7 @@ class GptOssBridge(Qwen2MoEBridge):
             moe_router_topk=hf.num_experts_per_tok,
             num_moe_experts=hf.num_local_experts,
             moe_router_load_balancing_type="none",
-            moe_grouped_gemm=False,
+            moe_grouped_gemm=True,
             moe_router_score_function="softmax",
             moe_router_pre_softmax=False,
             # GPT-OSS has biases on q/k/v/o + router

@@ -246,3 +246,92 @@ but it's only 20 hex chars. WandB API keys are always 40 hex chars.
 
 **Fix needed:** User must provide the full 40-char WandB API key from
 https://wandb.ai/authorize and update `.env`: `WANDB_KEY=<40-char-key>`
+
+## 18. GPT-OSS config.json retains old eos/pad token IDs after tokenizer swap
+
+**Date:** 2026-03-04
+
+**What happened:** `tokenizer_swap.py` replaced tokenizer files with Qwen3.5's but
+didn't update `eos_token_id` (200002) and `pad_token_id` (199999) in config.json.
+These are GPT-OSS's original token IDs. Qwen3.5 uses `eos=248046` (`<|im_end|>`)
+and `pad=248044` (`<|endoftext|>`). Would cause silent generation failures.
+
+**Fix:** Updated `tokenizer_swap.py` to read donor tokenizer's eos/pad IDs and
+overwrite them in config.json. Also manually patched the existing checkpoint.
+
+**Lesson:** When swapping tokenizers, ALL token ID references must be updated:
+vocab_size, eos_token_id, pad_token_id, bos_token_id. Don't just copy files.
+
+## 19. --add-bias-linear is not a valid Megatron flag
+
+**Date:** 2026-03-04
+
+**What happened:** GPT-OSS model args included `--add-bias-linear` (from moh/oss
+branch). Megatron doesn't have this flag — bias is enabled by default. The flag
+to disable it is `--disable-bias-linear`. Conversion failed with "unrecognized arguments".
+
+**Fix:** Removed `--add-bias-linear` from model args. Bias is on by default.
+
+## 20. --moe-permute-fusion requires newer Megatron (fused_permute not available)
+
+**Date:** 2026-03-04
+
+**What happened:** Model args had `--moe-permute-fusion` from the 120b config.
+Our pinned Megatron commit doesn't have `fused_permute` in `moe_utils.py`.
+Crash: `ImportError: cannot import name 'fused_permute'`.
+
+**Fix:** Removed `--moe-permute-fusion` from model args.
+
+## 21. persist_layer_norm=True incompatible with --transformer-impl local
+
+**Date:** 2026-03-04
+
+**What happened:** Megatron defaults `persist_layer_norm=True`. With
+`--transformer-impl local`, this crashes: `AssertionError: persist_layer_norm
+not supported by torch LayerNorm`. TE/Apex is needed for persistent layer norm.
+
+**Fix:** Added `--no-persist-layer-norm` to model args.
+
+## 22. --moe-grouped-gemm requires grouped_gemm package (can't build)
+
+**Date:** 2026-03-04
+
+**What happened:** `--moe-grouped-gemm` triggers `GroupedMLP` which requires
+`grouped_gemm` package. The package fails to build from source (CUDA compilation
+errors). Without it, Megatron uses `SequentialMLP` with per-expert weight names
+like `local_experts.{i}.linear_fc1.weight`.
+
+**Fix:** Removed `--moe-grouped-gemm` from model args. Updated bridge to handle
+per-expert `local_experts.{i}` naming by extracting from fused HF tensors.
+
+## 23. moe-layer-freq "[1]*24" glob-expanded by shell through torchrun
+
+**Date:** 2026-03-04
+
+**What happened:** `--moe-layer-freq "[1]*${N_MOE_LAYERS}"` was passed through
+bash array and torchrun. The `*` and `[]` characters got glob-expanded, producing
+an unrecognized argument error (argparse error with empty arg name).
+
+**Fix:** Changed to explicit array: `'[1,1,1,1,...,1]'` (24 ones).
+
+## 24. AM-Qwen3-Distilled OOM when loading all 1.89M rows in memory
+
+**Date:** 2026-03-04
+
+**What happened:** `prep_datasets_with_splits.py` collected all 1.89M rows into
+a Python list before splitting, causing the process to be OOM-killed.
+
+**Fix:** Rewrote to streaming hash-based split: each row is assigned to train/test
+based on `md5(seed:index)`, written in batches of 5000 to parquet. Never holds
+more than 5000 rows in memory.
+
+## 25. DotProductAttention doesn't support packed sequences
+
+**Date:** 2026-03-04
+
+**What happened:** Smoke test with `--attention-backend unfused` crashed:
+`AssertionError: Packed sequence is not supported by DotProductAttention.`
+SFT rollout packs sequences by default, which requires flash attention.
+
+**Fix:** Switched to `--attention-backend flash`. Required installing flash-attn
+with `TORCH_CUDA_ARCH_LIST="9.0"` to limit compilation to H100 only (faster build).

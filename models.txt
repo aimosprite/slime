@@ -5,6 +5,7 @@
 # To add a new model, just add a line here.
 
 openai/gpt-oss-120b            gpt-oss-120b
+openai/gpt-oss-20b             gpt-oss-20b
 Qwen/Qwen3-8B                  Qwen3-8B
 Qwen/Qwen3-32B                 Qwen3-32B
 Qwen/Qwen3-30B-A3B             Qwen3-30B-A3B

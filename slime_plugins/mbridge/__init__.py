@@ -1,3 +1,5 @@
+import slime_plugins.models.gpt_oss  # noqa: F401 — patches DotProductAttention for packed seq support
+
 from .deepseek_v32 import DeepseekV32Bridge
 from .glm4 import GLM4Bridge
 from .glm4moe import GLM4MoEBridge
