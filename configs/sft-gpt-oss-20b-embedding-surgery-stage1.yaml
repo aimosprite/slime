@@ -29,13 +29,13 @@ rollout_shuffle:     1
 rollout_seed:        42
 
 # Sequence length
-seq_length:              16384
-rollout_max_context_len: 16384
+seq_length:              8192
+rollout_max_context_len: 8192
 
 # Training — 1.89M traces, 1 epoch should be enough to learn embeddings
 num_epoch:          1
 global_batch_size:  128
-rollout_batch_size: 256
+rollout_batch_size: 512
 micro_batch_size:   1
 save_interval:      100
 
@@ -57,7 +57,7 @@ adam_beta1:         0.9
 adam_beta2:         0.95
 
 # Parallelism — TP=2, 8 GPUs → DP=4
-tensor_model_parallel_size:  2
+tensor_model_parallel_size:  4
 pipeline_model_parallel_size: 1
 context_parallel_size:       1
 expert_model_parallel_size:  1
