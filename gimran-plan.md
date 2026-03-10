@@ -40,3 +40,8 @@ again, make a plan. but don't forget:
 EVERYTHING I SAID IS SUPER IMPORTANT. DON'T MISS ANYTHING ^^^
 
 ---------------------------------------------------------------
+
+
+TODO CHECH: VERY IMPORTANT
+- check that lr is not super low. 
+- don't train on the full thing. 200k is enough. 

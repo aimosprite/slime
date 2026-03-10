@@ -188,7 +188,7 @@ python3 -c "import torch; print(torch.__version__)" 2>/dev/null || \
         --index-url https://download.pytorch.org/whl/cu129
 
 echo "=== installing flash-attn ==="
-MAX_JOBS=2 uv pip install --system flash-attn==2.7.4.post1 --no-build-isolation
+MAX_JOBS=$(nproc) uv pip install --system flash-attn==2.7.4.post1 --no-build-isolation
 
 echo "=== installing ML training stack ==="
 uv pip install --system \
