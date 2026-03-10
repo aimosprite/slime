@@ -33,6 +33,7 @@ This example shows how to run **on-policy distillation (OPD)** using slime. A sm
   - `post_process_rewards` trims the teacher logprobs to the generated response span and writes the tensors back to each `Sample` to compute advantages.
 - `run-qwen3-8B-opd.sh` launches an SGLang teacher server, then submits a Ray job that runs `train.py`.
 - `run-qwen3-8B-opd-megatron.sh` uses Megatron-loaded teacher model (no external server needed).
+- `opsdc_single_node/` adds a single-node self-distillation recipe that uses the same OPD plumbing with a concise teacher prompt and a gated HF dataset adapter.
 
 ## Running the example
 

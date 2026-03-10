@@ -1295,6 +1295,12 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--teacher-prompt-style",
+                type=str,
+                default="concise",
+                help="Auxiliary prompt style for custom OPD/self-distillation reward hooks.",
+            )
+            parser.add_argument(
                 "--custom-convert-samples-to-train-data-path",
                 type=str,
                 default=None,

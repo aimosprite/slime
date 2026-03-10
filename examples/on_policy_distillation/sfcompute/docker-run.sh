@@ -101,6 +101,11 @@ case "${COMMAND}" in
             -e PREP_WORKER_ONLY=1 \
             -e DEBUG="${DEBUG:-0}" \
             -e NCCL_DEBUG="${NCCL_DEBUG:-WARN}" \
+            -e NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-1}" \
+            -e NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-1}" \
+            -e NCCL_NVLS_ENABLE="${NCCL_NVLS_ENABLE:-0}" \
+            -e NCCL_CUMEM_ENABLE="${NCCL_CUMEM_ENABLE:-0}" \
+            -e TORCH_SHOW_CPP_STACKTRACES=1 \
             -w /root/slime \
             "${IMAGE}" \
             bash -lc 'set -euo pipefail
