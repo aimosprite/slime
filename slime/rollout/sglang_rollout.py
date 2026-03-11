@@ -4,7 +4,7 @@ import inspect
 import logging
 import uuid
 from argparse import Namespace
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from typing import Any
 
@@ -34,6 +34,14 @@ from .rm_hub import async_rm, batched_async_rm
 __all__ = ["generate_rollout"]
 
 logger = logging.getLogger(__name__)
+
+
+def _get_eval_reward_value(sample: Sample, reward_key: str | None) -> Any:
+    """Support both scalar rewards and keyed reward payloads in eval output."""
+    reward = sample.reward
+    if reward_key and isinstance(reward, Mapping):
+        return reward.get(reward_key, reward)
+    return reward
 
 
 class GenerateState(metaclass=SingletonMeta):
@@ -552,7 +560,7 @@ async def eval_rollout_single_dataset(
     reward_key = args.eval_reward_key or args.reward_key
     return {
         dataset_cfg.name: {
-            "rewards": [sample.reward if not reward_key else sample.reward[reward_key] for sample in data],
+            "rewards": [_get_eval_reward_value(sample, reward_key) for sample in data],
             "truncated": [sample.status == Sample.Status.TRUNCATED for sample in data],
             "samples": data,
         }

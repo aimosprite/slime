@@ -1,4 +1,4 @@
-# Training hyperparameters for OPD on 16x H100 (2 nodes x 8 GPUs).
+# Training hyperparameters for OPD on a single 8x H100 node.
 # Edit this file to tune a run. Env vars always take precedence over values here.
 # Paths stay in config-16xh100.env; GPU layout has moved here.
 
@@ -24,11 +24,11 @@ student_model: Qwen/Qwen3.5-35B-A3B
 student_model_args: qwen3.5-35B-A3B.sh
 
 # ── GPU allocation ────────────────────────────────────────────────────
-# Cluster defaults:
-# - 2 nodes total
-# - 8 GPUs per node
-# Node 1 runs teacher + Ray head; node 2 runs student workers.
-cluster_num_nodes: 2
+# Single-node defaults:
+# - 1 node total
+# - 8 GPUs on the node
+# - student uses GPUs 0..3 via Ray, teacher uses GPUs 4..7
+cluster_num_nodes: 1
 gpus_per_node: 8
 # Optional override for student GPUs per worker node.
 # If omitted, defaults to gpus_per_node for multi-node, or gpus_per_node/2 for single-node.

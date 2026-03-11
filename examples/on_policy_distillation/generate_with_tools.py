@@ -10,6 +10,7 @@ import re
 
 import aiohttp
 import torch
+from transformers.tokenization_utils_base import BatchEncoding
 
 from slime.rollout.sglang_rollout import GenerateState
 from slime.utils.http_utils import post
@@ -53,6 +54,21 @@ SYSTEM_PROMPT = (
 _TOOL_CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
 
 
+def _normalize_token_ids(token_ids) -> list[int]:
+    """Coerce tokenizer outputs to a flat list of token ids.
+
+    Newer Transformers builds may return a ``BatchEncoding`` from
+    ``apply_chat_template`` where older versions returned a plain list[int].
+    """
+    if isinstance(token_ids, BatchEncoding):
+        token_ids = token_ids["input_ids"]
+    if isinstance(token_ids, torch.Tensor):
+        token_ids = token_ids.tolist()
+    if token_ids and isinstance(token_ids[0], list):
+        token_ids = token_ids[0]
+    return list(token_ids)
+
+
 def parse_tool_call(text: str) -> tuple[str, str] | None:
     """Parse Qwen3-native ``<tool_call>`` block. Returns (tool_name, code) or None."""
     m = _TOOL_CALL_RE.search(text)
@@ -83,10 +99,10 @@ def get_tool_response_and_gen_prompt_tokens(tokenizer, tool_name: str, content: 
     prefix_msg = {"role": "user", "content": "FOR CALCULATING TOKENS ONLY"}
     tool_msg = {"role": "tool", "name": tool_name, "content": content}
 
-    prefix_ids = tokenizer.apply_chat_template([prefix_msg], tokenize=True)
-    full_ids = tokenizer.apply_chat_template(
+    prefix_ids = _normalize_token_ids(tokenizer.apply_chat_template([prefix_msg], tokenize=True))
+    full_ids = _normalize_token_ids(tokenizer.apply_chat_template(
         [prefix_msg, tool_msg], tokenize=True, add_generation_prompt=True
-    )
+    ))
     return full_ids[len(prefix_ids):]
 
 
@@ -123,10 +139,10 @@ async def generate(args, sample: Sample, sampling_params) -> Sample:
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": sample.prompt},
     ]
-    prompt_token_ids: list[int] = tokenizer.apply_chat_template(
+    prompt_token_ids: list[int] = _normalize_token_ids(tokenizer.apply_chat_template(
         messages, tokenize=True, tools=[tool_spec], add_generation_prompt=True,
         enable_thinking=True,
-    )
+    ))
 
     response_token_ids: list[int] = []
     loss_masks: list[int] = []
