@@ -437,17 +437,36 @@ RAY_DASHBOARD_PORT="${RAY_DASHBOARD_PORT:-8265}"
 TEACHER_MEM_FRACTION="${TEACHER_MEM_FRACTION:-0.75}"
 SGLANG_MEM_FRACTION_STATIC="${SGLANG_MEM_FRACTION_STATIC:-0.6}"
 if [ -z "${RAY_HEAD_IP+x}" ] || [ -z "${RAY_HEAD_IP}" ]; then
-    DETECTED_PRIMARY_IP="$(detect_primary_ip)"
-    if [ -n "${MASTER_ADDR:-}" ] && [ "${MASTER_ADDR}" != "127.0.0.1" ]; then
-        RAY_HEAD_IP="${MASTER_ADDR}"
-    elif [ -n "${DETECTED_PRIMARY_IP}" ] && [ "${DETECTED_PRIMARY_IP}" != "127.0.0.1" ]; then
-        RAY_HEAD_IP="${DETECTED_PRIMARY_IP}"
+    if [ "${CLUSTER_NUM_NODES}" -gt 1 ]; then
+        DETECTED_PRIMARY_IP="$(detect_primary_ip)"
+        if [ -n "${MASTER_ADDR:-}" ] && [ "${MASTER_ADDR}" != "127.0.0.1" ]; then
+            RAY_HEAD_IP="${MASTER_ADDR}"
+        elif [ -n "${DETECTED_PRIMARY_IP}" ] && [ "${DETECTED_PRIMARY_IP}" != "127.0.0.1" ]; then
+            RAY_HEAD_IP="${DETECTED_PRIMARY_IP}"
+        else
+            RAY_HEAD_IP="${MASTER_ADDR:-127.0.0.1}"
+        fi
     else
         RAY_HEAD_IP="${MASTER_ADDR:-127.0.0.1}"
     fi
 fi
 MASTER_ADDR="${MASTER_ADDR:-${RAY_HEAD_IP}}"
-TEACHER_IP="${TEACHER_IP:-${RAY_HEAD_IP}}"
+if [ "${CLUSTER_NUM_NODES}" -gt 1 ] && [ "${RAY_HEAD_IP}" = "127.0.0.1" ]; then
+    echo "Invalid ray_head_ip=127.0.0.1 for multi-node mode; set a reachable head-node IP."
+    exit 1
+fi
+if [ -z "${TEACHER_IP+x}" ] || [ -z "${TEACHER_IP}" ]; then
+    if [ "${CLUSTER_NUM_NODES}" -gt 1 ]; then
+        TEACHER_IP="${RAY_HEAD_IP}"
+    else
+        TEACHER_IP="127.0.0.1"
+    fi
+fi
+if [ "${CLUSTER_NUM_NODES}" -gt 1 ] && [ "${TEACHER_IP}" = "127.0.0.1" ]; then
+    echo "Invalid teacher_ip=127.0.0.1 for multi-node mode; set a reachable head-node IP."
+    exit 1
+fi
+TEACHER_HEALTH_IP="${TEACHER_HEALTH_IP:-127.0.0.1}"
 MAX_TEACHER_WAIT_SEC="${MAX_TEACHER_WAIT_SEC:-300}"
 ENABLE_EVAL="${ENABLE_EVAL:-1}"
 WANDB_PROJECT="${WANDB_PROJECT:-slime-dev}"
@@ -837,7 +856,7 @@ CUDA_VISIBLE_DEVICES="${TEACHER_VISIBLE_GPUS}" python3 -m sglang.launch_server \
 TEACHER_PID=$!
 
 teacher_waited_sec=0
-until curl -sf "http://${TEACHER_IP}:${TEACHER_PORT}/health_generate" > /dev/null; do
+until curl -sf "http://${TEACHER_HEALTH_IP}:${TEACHER_PORT}/health_generate" > /dev/null; do
     echo "Waiting for teacher server to start..."
     tail -n 10 "${LOG_FILE}"
     teacher_waited_sec=$((teacher_waited_sec + 5))
@@ -847,7 +866,7 @@ until curl -sf "http://${TEACHER_IP}:${TEACHER_PORT}/health_generate" > /dev/nul
     fi
     sleep 5
 done
-curl "http://${TEACHER_IP}:${TEACHER_PORT}/get_model_info"
+curl "http://${TEACHER_HEALTH_IP}:${TEACHER_PORT}/get_model_info"
 sleep 10
 
 export PYTHONUNBUFFERED=1
