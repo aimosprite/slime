@@ -5,13 +5,22 @@
 # ── Dataset ──────────────────────────────────────────────────────────
 # HuggingFace dataset ID. The prep script downloads & converts it to JSONL.
 # Examples:
-#   BytedTsinghua-SIA/DAPO-Math-17k   (default, math reasoning)
+#   aimosprite/training-set             (custom OPD train set)
 #   OpenEvals/IMO-AnswerBench          (400 IMO short-answer problems)
-dataset: OpenEvals/IMO-AnswerBench
-# Field name used as the prompt (varies per dataset).
-input_key: Problem
-# Field name used as the ground-truth label for eval grading.
-label_key: Short Answer
+dataset: aimosprite/training-set
+# Field name used as the training prompt.
+input_key: question
+# Field name used as the training answer / reference.
+label_key: ground_truth
+# Sort training problems low->high by this field. The dataset has no explicit
+# difficulty column, so we use chain-of-thought length as a proxy.
+train_difficulty_key: opus_cot_length
+
+# Separate evaluation dataset config.
+eval_dataset: aimosprite/test-large
+eval_input_key: prompt
+eval_label_key: answer
+eval_sample_size: 10
 # Reward model type for evaluation. Available: dapo, math, boxed_math,
 # deepscaler, f1, gpqa, ifbench, remote_rm.
 eval_rm_type: math
@@ -127,7 +136,7 @@ checkpoint_hf_upload_tracker: 1
 
 # ── Eval ─────────────────────────────────────────────────────────────
 enable_eval: 1
-eval_interval: 10
+eval_interval: 20
 n_samples_per_eval_prompt: 4
 eval_max_response_len: 16384
 eval_temperature: 1

@@ -170,8 +170,12 @@ STUDENT_SHORT="${STUDENT_MODEL##*/}"
 # Dataset config (fallbacks if train-config.yaml is absent)
 DATASET="${DATASET:-BytedTsinghua-SIA/DAPO-Math-17k}"
 DATASET_SHORT="$(echo "${DATASET##*/}" | tr '[:upper:]' '[:lower:]')"
+EVAL_DATASET="${EVAL_DATASET:-${DATASET}}"
+EVAL_DATASET_SHORT="$(echo "${EVAL_DATASET##*/}" | tr '[:upper:]' '[:lower:]')"
 INPUT_KEY="${INPUT_KEY:-prompt}"
 LABEL_KEY="${LABEL_KEY:-reward_model}"
+EVAL_INPUT_KEY="${EVAL_INPUT_KEY:-${INPUT_KEY}}"
+EVAL_LABEL_KEY="${EVAL_LABEL_KEY:-${LABEL_KEY}}"
 EVAL_RM_TYPE="${EVAL_RM_TYPE:-dapo}"
 
 # Training hyperparameters (fallbacks if train-config.yaml is absent)
@@ -433,8 +437,11 @@ RAY_DASHBOARD_PORT="${RAY_DASHBOARD_PORT:-8265}"
 TEACHER_MEM_FRACTION="${TEACHER_MEM_FRACTION:-0.75}"
 SGLANG_MEM_FRACTION_STATIC="${SGLANG_MEM_FRACTION_STATIC:-0.6}"
 if [ -z "${RAY_HEAD_IP+x}" ] || [ -z "${RAY_HEAD_IP}" ]; then
-    if [ "${CLUSTER_NUM_NODES}" -gt 1 ]; then
-        RAY_HEAD_IP="$(detect_primary_ip)"
+    DETECTED_PRIMARY_IP="$(detect_primary_ip)"
+    if [ -n "${MASTER_ADDR:-}" ] && [ "${MASTER_ADDR}" != "127.0.0.1" ]; then
+        RAY_HEAD_IP="${MASTER_ADDR}"
+    elif [ -n "${DETECTED_PRIMARY_IP}" ] && [ "${DETECTED_PRIMARY_IP}" != "127.0.0.1" ]; then
+        RAY_HEAD_IP="${DETECTED_PRIMARY_IP}"
     else
         RAY_HEAD_IP="${MASTER_ADDR:-127.0.0.1}"
     fi
@@ -445,6 +452,7 @@ MAX_TEACHER_WAIT_SEC="${MAX_TEACHER_WAIT_SEC:-300}"
 ENABLE_EVAL="${ENABLE_EVAL:-1}"
 WANDB_PROJECT="${WANDB_PROJECT:-slime-dev}"
 WANDB_GROUP="${WANDB_GROUP:-${TEACHER_SHORT}-to-${STUDENT_SHORT}-opd}"
+WANDB_ALWAYS_USE_TRAIN_STEP="${WANDB_ALWAYS_USE_TRAIN_STEP:-1}"
 
 RAY_NUM_GPUS="$(count_csv_items "${RAY_VISIBLE_GPUS}")"
 if [ -z "${USE_COLOCATE}" ]; then
@@ -847,14 +855,8 @@ source "${REPO_DIR}/scripts/models/${STUDENT_MODEL_ARGS}"
 
 DATA_DIR="${POOL_DIR}/${DATASET_SHORT}"
 TRAIN_DATA="${DATA_DIR}/${DATASET_SHORT}-train.jsonl"
-EVAL_DATA="${DATA_DIR}/${DATASET_SHORT}-eval.jsonl"
-FALLBACK_DATA="${DATA_DIR}/${DATASET_SHORT}.jsonl"
-if [ ! -f "${TRAIN_DATA}" ] && [ -f "${FALLBACK_DATA}" ]; then
-    TRAIN_DATA="${FALLBACK_DATA}"
-fi
-if [ ! -f "${EVAL_DATA}" ] && [ -f "${FALLBACK_DATA}" ]; then
-    EVAL_DATA="${FALLBACK_DATA}"
-fi
+EVAL_DATA_DIR="${POOL_DIR}/${EVAL_DATASET_SHORT}"
+EVAL_DATA="${EVAL_DATA_DIR}/${EVAL_DATASET_SHORT}-eval.jsonl"
 if [ ! -f "${TRAIN_DATA}" ]; then
     echo "Missing training data file: ${TRAIN_DATA}"
     exit 1
@@ -917,14 +919,15 @@ defaults:
 datasets:
   eval:
     path: ${EVAL_DATA}
-    input_key: ${INPUT_KEY}
-    label_key: ${LABEL_KEY}
+    input_key: ${EVAL_INPUT_KEY}
+    label_key: ${EVAL_LABEL_KEY}
     rm_type: ${EVAL_RM_TYPE}
 EVALEOF
    EVAL_ARGS=(
       --eval-interval "${EVAL_INTERVAL}"
       --eval-config "${EVAL_CONFIG_FILE}"
       --eval-reward-key acc
+      --skip-eval-before-train
    )
 fi
 
@@ -980,6 +983,9 @@ WANDB_ARGS=(
    --wandb-key "${WANDB_KEY}"
    --wandb-config-file "${TRAIN_CONFIG}"
 )
+if [ "${WANDB_ALWAYS_USE_TRAIN_STEP}" = "1" ]; then
+   WANDB_ARGS+=(--wandb-always-use-train-step)
+fi
 
 SGLANG_ARGS=(
    --rollout-num-gpus-per-engine "${ROLLOUT_NUM_GPUS_PER_ENGINE}"

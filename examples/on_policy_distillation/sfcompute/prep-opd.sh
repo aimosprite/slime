@@ -49,6 +49,10 @@ STUDENT_SHORT="${STUDENT_MODEL##*/}"
 # Dataset config
 DATASET="${DATASET:-BytedTsinghua-SIA/DAPO-Math-17k}"
 DATASET_SHORT="$(echo "${DATASET##*/}" | tr '[:upper:]' '[:lower:]')"
+EVAL_DATASET="${EVAL_DATASET:-${DATASET}}"
+EVAL_DATASET_SHORT="$(echo "${EVAL_DATASET##*/}" | tr '[:upper:]' '[:lower:]')"
+TRAIN_DIFFICULTY_KEY="${TRAIN_DIFFICULTY_KEY:-}"
+EVAL_SAMPLE_SIZE="${EVAL_SAMPLE_SIZE:-10}"
 
 # Resolve model paths: local absolute paths are used directly, HF IDs resolve to POOL_DIR.
 if [[ "${TEACHER_MODEL}" == /* ]]; then
@@ -252,61 +256,115 @@ PREP_WORKER_ONLY="${PREP_WORKER_ONLY:-0}"
 
 if [ "${PREP_WORKER_ONLY}" != "1" ]; then
     DATA_DIR="${POOL_DIR}/${DATASET_SHORT}"
-    DATA_JSONL="${DATA_DIR}/${DATASET_SHORT}.jsonl"
     TRAIN_JSONL="${DATA_DIR}/${DATASET_SHORT}-train.jsonl"
-    EVAL_JSONL="${DATA_DIR}/${DATASET_SHORT}-eval.jsonl"
+    EVAL_DATA_DIR="${POOL_DIR}/${EVAL_DATASET_SHORT}"
+    EVAL_JSONL="${EVAL_DATA_DIR}/${EVAL_DATASET_SHORT}-eval.jsonl"
 
-    # Download the dataset from HuggingFace if no parquet files exist locally.
-    FOUND_PARQUET="$(find "${DATA_DIR}" -name '*.parquet' 2>/dev/null | head -1 || true)"
-    if [ -z "${FOUND_PARQUET}" ]; then
+    mkdir -p "${DATA_DIR}" "${EVAL_DATA_DIR}"
+
+    if [ -z "$(find "${DATA_DIR}" -type f \( -name '*.parquet' -o -name '*.jsonl' \) 2>/dev/null | head -1 || true)" ]; then
         echo "Downloading dataset ${DATASET}..."
-        mkdir -p "${DATA_DIR}"
         hf_download "${DATASET}" \
             --repo-type dataset \
             --local-dir "${DATA_DIR}"
     fi
 
-    # Locate the first parquet file in the downloaded directory.
-    PARQUET_INPUT="$(find "${DATA_DIR}" -name '*.parquet' 2>/dev/null | head -1 || true)"
-    if [ -z "${PARQUET_INPUT}" ]; then
-        echo "No .parquet file found in ${DATA_DIR} after download."
-        echo "Check that dataset '${DATASET}' exists on HuggingFace."
+    if [ "${EVAL_DATASET}" != "${DATASET}" ] && [ -z "$(find "${EVAL_DATA_DIR}" -type f \( -name '*.parquet' -o -name '*.jsonl' \) 2>/dev/null | head -1 || true)" ]; then
+        echo "Downloading eval dataset ${EVAL_DATASET}..."
+        hf_download "${EVAL_DATASET}" \
+            --repo-type dataset \
+            --local-dir "${EVAL_DATA_DIR}"
+    fi
+
+    TRAIN_SOURCE="$(find "${DATA_DIR}" -type f \( -name '*.jsonl' -o -name '*.parquet' \) 2>/dev/null | sort | head -1 || true)"
+    EVAL_SOURCE="$(find "${EVAL_DATA_DIR}" -type f \( -name '*.jsonl' -o -name '*.parquet' \) 2>/dev/null | sort | head -1 || true)"
+
+    if [ -z "${TRAIN_SOURCE}" ]; then
+        echo "No supported train source (.jsonl or .parquet) found in ${DATA_DIR}."
         exit 1
     fi
-    echo "Using parquet: ${PARQUET_INPUT}"
+    if [ -z "${EVAL_SOURCE}" ]; then
+        echo "No supported eval source (.jsonl or .parquet) found in ${EVAL_DATA_DIR}."
+        exit 1
+    fi
 
-    if [ ! -f "${DATA_JSONL}" ] && [ ! -f "${TRAIN_JSONL}" ]; then
-        echo "Converting dataset parquet to JSONL with train/eval split..."
-        PARQUET_INPUT="${PARQUET_INPUT}" DATA_JSONL="${DATA_JSONL}" \
-        TRAIN_JSONL="${TRAIN_JSONL}" EVAL_JSONL="${EVAL_JSONL}" python3 - <<'PY'
+    echo "Using train source: ${TRAIN_SOURCE}"
+    echo "Using eval source: ${EVAL_SOURCE}"
+
+    if [ ! -f "${TRAIN_JSONL}" ]; then
+        echo "Building train JSONL..."
+        TRAIN_SOURCE="${TRAIN_SOURCE}" TRAIN_JSONL="${TRAIN_JSONL}" \
+        TRAIN_DIFFICULTY_KEY="${TRAIN_DIFFICULTY_KEY}" python3 - <<'PY'
 import os
+import json
 import pandas as pd
 
-parquet_input = os.environ["PARQUET_INPUT"]
-data_jsonl = os.environ["DATA_JSONL"]
 train_jsonl = os.environ["TRAIN_JSONL"]
-eval_jsonl = os.environ["EVAL_JSONL"]
+train_source = os.environ["TRAIN_SOURCE"]
+difficulty_key = os.environ.get("TRAIN_DIFFICULTY_KEY", "").strip()
 
-df = pd.read_parquet(parquet_input)
-df.to_json(data_jsonl, orient="records", lines=True)
-print(f"Wrote {len(df)} rows to {data_jsonl}")
-
-# Create train/eval split (last 10% for eval, at least 1 row)
-eval_size = max(1, min(500, len(df) // 10))
-if len(df) <= eval_size:
-    # Dataset too small to split; use all rows for both train and eval.
-    df.to_json(train_jsonl, orient="records", lines=True)
-    df.to_json(eval_jsonl, orient="records", lines=True)
-    print(f"Dataset has only {len(df)} rows; using all for both train and eval.")
+if train_source.endswith(".parquet"):
+    rows = pd.read_parquet(train_source).to_dict(orient="records")
 else:
-    train_df = df.iloc[:-eval_size]
-    eval_df = df.iloc[-eval_size:]
-    train_df.to_json(train_jsonl, orient="records", lines=True)
-    eval_df.to_json(eval_jsonl, orient="records", lines=True)
-    print(f"Split: {len(train_df)} train, {len(eval_df)} eval")
+    rows = []
+    with open(train_source) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                rows.append(json.loads(line))
+
+if difficulty_key:
+    def sort_key(row):
+        value = row.get(difficulty_key, "")
+        try:
+            return (0, float(value))
+        except Exception:
+            return (1, str(value))
+    rows.sort(key=sort_key)
+
+with open(train_jsonl, "w") as f:
+    for row in rows:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+print(f"Wrote {len(rows)} sorted train rows to {train_jsonl}")
 PY
     else
-        echo "Dataset JSONL already exists, skipping conversion."
+        echo "Train JSONL already exists, skipping conversion."
+    fi
+
+    if [ ! -f "${EVAL_JSONL}" ]; then
+        echo "Building eval JSONL..."
+        EVAL_SOURCE="${EVAL_SOURCE}" EVAL_JSONL="${EVAL_JSONL}" \
+        EVAL_SAMPLE_SIZE="${EVAL_SAMPLE_SIZE}" python3 - <<'PY'
+import json
+import os
+import random
+import pandas as pd
+
+eval_source = os.environ["EVAL_SOURCE"]
+eval_jsonl = os.environ["EVAL_JSONL"]
+sample_size = int(os.environ.get("EVAL_SAMPLE_SIZE", "10"))
+
+if eval_source.endswith(".parquet"):
+    rows = pd.read_parquet(eval_source).to_dict(orient="records")
+else:
+    rows = []
+    with open(eval_source) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                rows.append(json.loads(line))
+
+rng = random.Random(42)
+if len(rows) > sample_size:
+    rows = rng.sample(rows, sample_size)
+
+with open(eval_jsonl, "w") as f:
+    for row in rows:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+print(f"Wrote {len(rows)} eval rows to {eval_jsonl}")
+PY
+    else
+        echo "Eval JSONL already exists, skipping conversion."
     fi
 
     if [ ! -d "${TEACHER_PATH}" ]; then
