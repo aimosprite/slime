@@ -1,6 +1,7 @@
 """Custom generate function + OPD reward/post-processing with multi-turn tool calls."""
 
 import ast
+import asyncio
 import json
 import logging
 import re
@@ -33,10 +34,18 @@ THINKING_GENERAL_SAMPLING_DEFAULTS = {
     "repetition_penalty": 1.0,
 }
 
-SYSTEM_PROMPT = (
+STUDENT_SYSTEM_PROMPT = (
     "You are an expert competition mathematician.\n"
-    "Use concise reasoning and avoid repeated prose.\n"
     "You may call the `python` tool for exact computation.\n"
+    "Do not hallucinate tool outputs; always wait for tool results.\n"
+    "After finishing computation, provide only the final answer in \\boxed{...}."
+)
+
+CONCISE_TEACHER_SYSTEM_PROMPT = (
+    "You are an expert competition mathematician.\n"
+    "Solve the problem with concise reasoning.\n"
+    "Avoid repeated prose and unnecessary explanation.\n"
+    "If computation helps, you may call the `python` tool.\n"
     "Do not hallucinate tool outputs; always wait for tool results.\n"
     "After finishing computation, provide only the final answer in \\boxed{...}."
 )
@@ -53,6 +62,8 @@ _TOOL_CALL_PARAMETER_RE = re.compile(
     re.DOTALL,
 )
 
+_teacher_rm_semaphore: asyncio.Semaphore | None = None
+
 
 def _normalize_token_ids(token_ids) -> list[int]:
     """Coerce tokenizer outputs to a flat list of token ids.
@@ -67,6 +78,31 @@ def _normalize_token_ids(token_ids) -> list[int]:
     if token_ids and isinstance(token_ids[0], list):
         token_ids = token_ids[0]
     return list(token_ids)
+
+
+def _get_teacher_rm_semaphore(concurrency: int = 8) -> asyncio.Semaphore:
+    global _teacher_rm_semaphore
+    if _teacher_rm_semaphore is None:
+        _teacher_rm_semaphore = asyncio.Semaphore(concurrency)
+    return _teacher_rm_semaphore
+
+
+def _extract_question(prompt: str | list[dict[str, str]]) -> str:
+    if isinstance(prompt, str):
+        return prompt
+    for message in reversed(prompt):
+        if message.get("role") == "user":
+            return message.get("content", "")
+    raise ValueError("Unable to recover the original user question from the sample prompt.")
+
+
+def _build_teacher_messages(question: str, style: str = "concise") -> list[dict[str, str]]:
+    if style != "concise":
+        raise ValueError(f"Unsupported teacher prompt style: {style}")
+    return [
+        {"role": "system", "content": CONCISE_TEACHER_SYSTEM_PROMPT},
+        {"role": "user", "content": question},
+    ]
 
 
 def _get_arguments_config(func_name: str, tools: list[dict] | None) -> dict:
@@ -139,6 +175,20 @@ def parse_tool_call(text: str, tools: list[dict] | None = None) -> tuple[str, st
         raw_tool_calls = [text]
 
     for tool_content in raw_tool_calls:
+        stripped = tool_content.strip()
+        if stripped.startswith("{"):
+            try:
+                tool_call = json.loads(stripped)
+            except json.JSONDecodeError:
+                tool_call = None
+            if isinstance(tool_call, dict):
+                func_name = tool_call.get("name")
+                arguments = tool_call.get("arguments", {})
+                if func_name == "python":
+                    code = arguments.get("code", "")
+                    if isinstance(code, str) and code.strip():
+                        return func_name, code
+
         funcs = _TOOL_CALL_FUNCTION_RE.findall(tool_content)
         for func_match in funcs:
             func_body = func_match[0] or func_match[1]
@@ -216,7 +266,7 @@ async def generate(args, sample: Sample, sampling_params) -> Sample:
 
     # ── Build initial prompt ──────────────────────────────────────────
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": STUDENT_SYSTEM_PROMPT},
         {"role": "user", "content": sample.prompt},
     ]
     prompt_token_ids: list[int] = _normalize_token_ids(tokenizer.apply_chat_template(
@@ -354,9 +404,24 @@ async def generate(args, sample: Sample, sampling_params) -> Sample:
 # ---------------------------------------------------------------------------
 
 async def reward_func(args, sample, **kwargs):
-    """Call teacher sglang server to get token-level log-probs on the student's rollout."""
+    """Call teacher sglang server to get token-level log-probs under a concise teacher prompt."""
+    state = GenerateState(args)
+    tokenizer = state.tokenizer
+    tool_spec = get_tool_spec()
+    question = _extract_question(sample.prompt)
+    teacher_messages = _build_teacher_messages(question, style=getattr(args, "teacher_prompt_style", "concise"))
+    teacher_prompt_ids = _normalize_token_ids(
+        tokenizer.apply_chat_template(
+            teacher_messages,
+            tokenize=True,
+            tools=[tool_spec],
+            add_generation_prompt=True,
+            enable_thinking=True,
+        )
+    )
+    response_ids = sample.tokens[-sample.response_length :] if sample.response_length > 0 else []
     payload = {
-        "input_ids": sample.tokens,
+        "input_ids": teacher_prompt_ids + response_ids,
         "sampling_params": {
             "temperature": 0,
             "max_new_tokens": 0,
@@ -366,10 +431,12 @@ async def reward_func(args, sample, **kwargs):
         "logprob_start_len": 0,
     }
     session_kwargs = {}
-    async with aiohttp.ClientSession(**session_kwargs) as session:
-        async with session.post(args.rm_url, json=payload) as resp:
-            resp.raise_for_status()
-            return await resp.json()
+    rm_concurrency = getattr(args, "teacher_request_concurrency", 8)
+    async with _get_teacher_rm_semaphore(rm_concurrency):
+        async with aiohttp.ClientSession(**session_kwargs) as session:
+            async with session.post(args.rm_url, json=payload) as resp:
+                resp.raise_for_status()
+                return await resp.json()
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 # Training hyperparameters for OPD on a single 8x H100 node.
 # Edit this file to tune a run. Env vars always take precedence over values here.
-# Paths stay in config-16xh100.env; GPU layout has moved here.
+# Paths stay in config-16xh100.env; this file carries the active single-node layout.
 
 # ── Dataset ──────────────────────────────────────────────────────────
 # HuggingFace dataset ID. The prep script downloads & converts it to JSONL.
@@ -27,29 +27,27 @@ eval_rm_type: math
 
 # ── Models ────────────────────────────────────────────────────────────
 # HuggingFace model IDs for teacher and student.
-teacher_model: Qwen/Qwen3.5-122B-A10B
+# OPSDC-style self-distillation uses the same base model for both; the
+# teacher behavior comes from prompting, not from a larger architecture.
+teacher_model: Qwen/Qwen3.5-35B-A3B
 student_model: Qwen/Qwen3.5-35B-A3B
 # Model args script for the student (under scripts/models/).
 student_model_args: qwen3.5-35B-A3B.sh
 
 # ── GPU allocation ────────────────────────────────────────────────────
-# Single-node defaults:
+# Single-node layout:
 # - 1 node total
 # - 8 GPUs on the node
-# - student uses GPUs 0..3 via Ray, teacher uses GPUs 4..7
+# - student uses GPUs 0..5 via Ray
+# - teacher uses GPUs 6..7
 cluster_num_nodes: 1
 gpus_per_node: 8
-# Optional override for student GPUs per worker node.
-# If omitted, defaults to gpus_per_node for multi-node, or gpus_per_node/2 for single-node.
-# num_gpus: 8
+num_gpus: 6
 
 # Teacher server (sglang) GPU mapping.
-# If omitted:
-# - multi-node: uses all local GPUs (0..gpus_per_node-1)
-# - single-node: uses upper half GPUs (e.g. 4..7 on 8-GPU host)
-# teacher_visible_gpus: 0,1,2,3,4,5,6,7
-# teacher_tp: 8
-# teacher_ep: 8
+teacher_visible_gpus: 6,7
+teacher_tp: 2
+teacher_ep: 2
 
 # Networking:
 # - ray_head_ip: IP address of this (head/teacher) node, reachable by worker nodes.
@@ -67,18 +65,18 @@ gpus_per_node: 8
 # - auto: cluster-aware default (none on multi-node head; 0..num_gpus-1 on single-node)
 # - none: reserve 0 GPUs on head node (for 2-node teacher/head + worker setup)
 # - CSV: explicit list, e.g. "0,1,2,3"
-ray_visible_gpus: auto
+ray_visible_gpus: 0,1,2,3,4,5
 # Optional override for actor worker node count.
 # Defaults to cluster_num_nodes - 1 (or 1 for single-node).
 # actor_num_nodes: 1
 
-# Optional overrides (usually leave commented; defaults derive from num_gpus):
-# actor_num_gpus_per_node: 8
-# tensor_model_parallel_size: 2
-# expert_model_parallel_size: 2
-# expert_tensor_parallel_size: 2
-# rollout_num_gpus_per_engine: 8
-# sglang_expert_parallel_size: 8
+# Explicit student-side parallelism for the 6-GPU split.
+actor_num_gpus_per_node: 6
+tensor_model_parallel_size: 2
+expert_model_parallel_size: 3
+expert_tensor_parallel_size: 1
+rollout_num_gpus_per_engine: 6
+sglang_expert_parallel_size: 6
 
 # Memory/runtime knobs.
 # use_colocate defaults to 0 on multi-node, 1 on single-node.
@@ -86,11 +84,11 @@ ray_visible_gpus: auto
 # train_memory_margin_bytes defaults to 1GiB on multi-node, 256MiB on single-node.
 # use_colocate: 0
 # use_cpu_optimizer_offload: 0
-# train_memory_margin_bytes: 1073741824
+train_memory_margin_bytes: 1073741824
 
 # Memory fractions for teacher and student rollout sglang servers.
-teacher_mem_fraction: 0.90
-sglang_mem_fraction_static: 0.6
+teacher_mem_fraction: 0.72
+sglang_mem_fraction_static: 0.55
 
 # ── Training duration ─────────────────────────────────────────────────
 # num_steps controls total gradient updates.
@@ -101,6 +99,7 @@ num_steps: 100
 # ── Rollout ───────────────────────────────────────────────────────────
 rollout_batch_size: 16
 n_samples_per_prompt: 4
+rollout_max_context_len: 16384
 rollout_max_response_len: 16384
 rollout_temperature: 1
 global_batch_size: 64
@@ -138,16 +137,24 @@ checkpoint_hf_upload_tracker: 1
 enable_eval: 1
 eval_interval: 20
 n_samples_per_eval_prompt: 4
+eval_max_context_len: 16384
 eval_max_response_len: 16384
 eval_temperature: 1
 
 # ── Tool calls ────────────────────────────────────────────────────────
 # Set use_tools: 0 to disable tool calls and fall back to plain single-turn OPD.
 use_tools: 1
+teacher_prompt_style: concise
+teacher_request_concurrency: 16
 tool_max_turns: 8
 tool_max_tool_calls: 4
 tool_timeout: 30
 tool_concurrency: 32
 
 # ── Performance ───────────────────────────────────────────────────────
-max_tokens_per_gpu: 16384
+# Keep the full context window; this only caps dynamic packing pressure.
+max_tokens_per_gpu: 12288
+
+# Teacher server throttles to avoid OOM on 2-GPU scoring.
+teacher_chunked_prefill_size: 2048
+teacher_max_running_requests: 16

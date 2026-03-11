@@ -2,12 +2,12 @@
 
 Run on-policy distillation (OPD) on SF Compute H100 nodes via Docker.
 
-Current defaults in `train-config.yaml` are for a 2-node run:
+Current defaults in `train-config.yaml` are for a single 8x H100 node:
 
-- 2 nodes total (`cluster_num_nodes: 2`)
-- 8 GPUs per node (`gpus_per_node: 8`)
-- Node A = teacher + Ray head
-- Node B = Ray worker (student training + rollout)
+- 1 node total (`cluster_num_nodes: 1`)
+- 8 GPUs on the node (`gpus_per_node: 8`)
+- GPUs `0..5` = student train + rollout
+- GPUs `6..7` = teacher scoring server
 
 ## Two-node quickstart (frictionless)
 
@@ -151,15 +151,9 @@ Note: the preflight requires Docker and a `.env` with your `HF_TOKEN`, so you ca
     - If that doesn't work, try [this](https://discord.com/channels/1447431405788463157/1461129003896410282/1476321257203957991)
 
 
-## Single-node runbook (legacy/simple)
+## Single-node runbook
 
-If you only have one 8x H100 node, set this in `train-config.yaml`:
-
-```yaml
-cluster_num_nodes: 1
-gpus_per_node: 8
-ray_visible_gpus: auto
-```
+The checked-in config already targets the single-node 8x H100 path.
 
 Then run:
 
@@ -167,4 +161,4 @@ Then run:
 bash examples/on_policy_distillation/sfcompute/setup.sh single
 ```
 
-`single` defaults auto-split GPUs (student lower half, teacher upper half), enable colocate, and enable CPU optimizer offload.
+`single` uses the active layout in `train-config.yaml` and `config-16xh100.env`.

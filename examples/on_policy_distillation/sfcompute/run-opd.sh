@@ -159,7 +159,7 @@ hf_upload() {
 }
 
 # Model config (fallbacks if train-config.yaml is absent)
-TEACHER_MODEL="${TEACHER_MODEL:-Qwen/Qwen3.5-122B-A10B}"
+TEACHER_MODEL="${TEACHER_MODEL:-Qwen/Qwen3.5-35B-A3B}"
 STUDENT_MODEL="${STUDENT_MODEL:-Qwen/Qwen3.5-35B-A3B}"
 STUDENT_MODEL_ARGS="${STUDENT_MODEL_ARGS:-qwen3.5-35B-A3B.sh}"
 
@@ -183,6 +183,7 @@ NUM_STEPS="${NUM_STEPS:-300}"
 ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-16}"
 N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-4}"
 ROLLOUT_MAX_RESPONSE_LEN="${ROLLOUT_MAX_RESPONSE_LEN:-16384}"
+ROLLOUT_MAX_CONTEXT_LEN="${ROLLOUT_MAX_CONTEXT_LEN:-${ROLLOUT_MAX_RESPONSE_LEN}}"
 ROLLOUT_TEMPERATURE="${ROLLOUT_TEMPERATURE:-1}"
 GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-64}"
 LEARNING_RATE="${LEARNING_RATE:-1e-6}"
@@ -195,9 +196,14 @@ ENTROPY_COEF="${ENTROPY_COEF:-0.00}"
 SAVE_INTERVAL="${SAVE_INTERVAL:-20}"
 EVAL_INTERVAL="${EVAL_INTERVAL:-20}"
 N_SAMPLES_PER_EVAL_PROMPT="${N_SAMPLES_PER_EVAL_PROMPT:-4}"
+EVAL_MAX_CONTEXT_LEN="${EVAL_MAX_CONTEXT_LEN:-${ROLLOUT_MAX_CONTEXT_LEN}}"
 EVAL_MAX_RESPONSE_LEN="${EVAL_MAX_RESPONSE_LEN:-16384}"
 EVAL_TEMPERATURE="${EVAL_TEMPERATURE:-1}"
 MAX_TOKENS_PER_GPU="${MAX_TOKENS_PER_GPU:-16384}"
+TEACHER_PROMPT_STYLE="${TEACHER_PROMPT_STYLE:-concise}"
+TEACHER_REQUEST_CONCURRENCY="${TEACHER_REQUEST_CONCURRENCY:-8}"
+TEACHER_CHUNKED_PREFILL_SIZE="${TEACHER_CHUNKED_PREFILL_SIZE:-2048}"
+TEACHER_MAX_RUNNING_REQUESTS="${TEACHER_MAX_RUNNING_REQUESTS:-16}"
 CHECKPOINT_SHIP_ENABLED="${CHECKPOINT_SHIP_ENABLED:-0}"
 CHECKPOINT_SHIP_EVERY="${CHECKPOINT_SHIP_EVERY:-${SAVE_INTERVAL}}"
 CHECKPOINT_SHIP_POLL_SEC="${CHECKPOINT_SHIP_POLL_SEC:-15}"
@@ -844,7 +850,8 @@ TEACHER_SGLANG_ARGS=(
     --host 0.0.0.0
     --port "${TEACHER_PORT}"
     --tp "${TEACHER_TP}"
-    --chunked-prefill-size 4096
+    --chunked-prefill-size "${TEACHER_CHUNKED_PREFILL_SIZE}"
+    --max-running-requests "${TEACHER_MAX_RUNNING_REQUESTS}"
     --mem-fraction-static "${TEACHER_MEM_FRACTION}"
 )
 if [ "${TEACHER_EP}" -gt 1 ]; then
@@ -904,6 +911,7 @@ ROLLOUT_ARGS=(
    --rollout-batch-size "${ROLLOUT_BATCH_SIZE}"
    --n-samples-per-prompt "${N_SAMPLES_PER_PROMPT}"
    --rollout-max-response-len "${ROLLOUT_MAX_RESPONSE_LEN}"
+   --rollout-max-context-len "${ROLLOUT_MAX_CONTEXT_LEN}"
    --rollout-temperature "${ROLLOUT_TEMPERATURE}"
    --global-batch-size "${GLOBAL_BATCH_SIZE}"
    --balance-data
@@ -915,6 +923,8 @@ if [ "${USE_TOOLS}" = "1" ]; then
       --custom-rm-path examples.on_policy_distillation.generate_with_tools.reward_func
       --custom-reward-post-process-path examples.on_policy_distillation.generate_with_tools.post_process_rewards
       --rm-url "http://${TEACHER_IP}:${TEACHER_PORT}/generate"
+      --teacher-prompt-style "${TEACHER_PROMPT_STYLE}"
+      --teacher-request-concurrency "${TEACHER_REQUEST_CONCURRENCY}"
    )
 else
    ROLLOUT_ARGS+=(--apply-chat-template)
@@ -944,6 +954,7 @@ datasets:
 EVALEOF
    EVAL_ARGS=(
       --eval-interval "${EVAL_INTERVAL}"
+      --eval-max-context-len "${EVAL_MAX_CONTEXT_LEN}"
       --eval-config "${EVAL_CONFIG_FILE}"
       --eval-reward-key acc
       --skip-eval-before-train

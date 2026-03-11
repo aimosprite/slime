@@ -1301,6 +1301,12 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 help="Auxiliary prompt style for custom OPD/self-distillation reward hooks.",
             )
             parser.add_argument(
+                "--teacher-request-concurrency",
+                type=int,
+                default=16,
+                help="Maximum number of concurrent teacher scoring requests for custom OPD reward hooks.",
+            )
+            parser.add_argument(
                 "--custom-convert-samples-to-train-data-path",
                 type=str,
                 default=None,

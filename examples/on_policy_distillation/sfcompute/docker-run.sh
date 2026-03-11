@@ -72,7 +72,7 @@ case "${COMMAND}" in
     train)
         # SLIME_HOST_IP tells slime's router/engines to use this IP instead of auto-detect.
         # Critical for Tailscale setups where the auto-detected LAN IP isn't reachable cross-node.
-        SLIME_HOST_IP="${SLIME_HOST_IP:-${RAY_HEAD_IP:-}}"
+        SLIME_HOST_IP="${SLIME_HOST_IP:-${RAY_HEAD_IP:-127.0.0.1}}"
         docker run --rm --gpus all --network host --ipc=host --shm-size=64g \
             --ulimit memlock=-1 --ulimit stack=67108864 \
             -v "${REPO_DIR}:/root/slime" \
