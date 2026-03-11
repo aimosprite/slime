@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -144,7 +145,9 @@ class Sample:
         return sample
 
     def get_reward_value(self, args) -> float:
-        return self.reward if not args.reward_key else self.reward[args.reward_key]
+        if not args.reward_key or not isinstance(self.reward, Mapping):
+            return self.reward
+        return self.reward.get(args.reward_key, self.reward)
 
     @property
     def effective_response_length(self):

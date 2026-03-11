@@ -1,9 +1,6 @@
-"""Custom generate function + OPD reward/post-processing with multi-turn tool calls.
+"""Custom generate function + OPD reward/post-processing with multi-turn tool calls."""
 
-Integrates multi-turn tool calls (Qwen3 native format) with OPD teacher scoring.
-Wired in via ``--custom-generate-function-path``.
-"""
-
+import ast
 import json
 import logging
 import re
@@ -40,8 +37,6 @@ SYSTEM_PROMPT = (
     "You are an expert competition mathematician.\n"
     "Use concise reasoning and avoid repeated prose.\n"
     "You may call the `python` tool for exact computation.\n"
-    "Use native tool calls only; do not emit literal <tool_call> tags.\n"
-    'When needed, call python with JSON arguments: {"code": "..."}.\n'
     "Do not hallucinate tool outputs; always wait for tool results.\n"
     "After finishing computation, provide only the final answer in \\boxed{...}."
 )
@@ -51,7 +46,12 @@ SYSTEM_PROMPT = (
 # Helpers: tool call parsing & token computation
 # ---------------------------------------------------------------------------
 
-_TOOL_CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
+_TOOL_CALL_RE = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
+_TOOL_CALL_FUNCTION_RE = re.compile(r"<function=(.*?)</function>|<function=(.*)$", re.DOTALL)
+_TOOL_CALL_PARAMETER_RE = re.compile(
+    r"<parameter=(.*?)(?:</parameter>|(?=<parameter=)|(?=</function>)|$)",
+    re.DOTALL,
+)
 
 
 def _normalize_token_ids(token_ids) -> list[int]:
@@ -69,24 +69,104 @@ def _normalize_token_ids(token_ids) -> list[int]:
     return list(token_ids)
 
 
-def parse_tool_call(text: str) -> tuple[str, str] | None:
-    """Parse Qwen3-native ``<tool_call>`` block. Returns (tool_name, code) or None."""
-    m = _TOOL_CALL_RE.search(text)
-    if m is None:
+def _get_arguments_config(func_name: str, tools: list[dict] | None) -> dict:
+    if tools is None:
+        return {}
+    for tool in tools:
+        if tool.get("type") != "function":
+            continue
+        function = tool.get("function", {})
+        if function.get("name") != func_name:
+            continue
+        params = function.get("parameters", {})
+        if isinstance(params, dict) and "properties" in params:
+            return params["properties"]
+        if isinstance(params, dict):
+            return params
+    logger.warning("Tool %r is not defined in the tools list.", func_name)
+    return {}
+
+
+def _convert_param_value(param_value: str, param_name: str, param_config: dict, func_name: str):
+    """Adapted from SGLang's qwen3_coder detector."""
+    if param_value.lower() == "null":
         return None
+    if param_name not in param_config:
+        return param_value
+
+    config = param_config[param_name]
+    param_type = str(config.get("type", "string")).strip().lower() if isinstance(config, dict) else "string"
+    if param_type in {"string", "str", "text", "varchar", "char", "enum"}:
+        return param_value
+    if any(param_type.startswith(prefix) for prefix in ("int", "uint", "long", "short", "unsigned")):
+        try:
+            return int(param_value)
+        except Exception:
+            logger.warning("Failed to parse integer parameter %r for tool %r.", param_name, func_name)
+            return param_value
+    if param_type.startswith("num") or param_type.startswith("float"):
+        try:
+            maybe_convert = "." not in param_value and "e" not in param_value.lower()
+            value = float(param_value)
+            return int(value) if maybe_convert and value.is_integer() else value
+        except Exception:
+            logger.warning("Failed to parse float parameter %r for tool %r.", param_name, func_name)
+            return param_value
+    if param_type in {"boolean", "bool", "binary"}:
+        return param_value.lower() == "true"
+    if param_type in {"object", "array", "arr"} or param_type.startswith("dict") or param_type.startswith("list"):
+        try:
+            return json.loads(param_value)
+        except Exception:
+            try:
+                return ast.literal_eval(param_value)
+            except Exception:
+                logger.warning("Failed to parse structured parameter %r for tool %r.", param_name, func_name)
+                return param_value
     try:
-        raw = m.group(1)
-        # The model sometimes emits newlines inside JSON values; escape them.
-        raw = raw.replace("\n", "\\n")
-        obj = json.loads(raw)
-        name = obj.get("name", "")
-        args = obj.get("arguments", {})
-        if name == "python":
-            code = args.get("code", "")
-            if code.strip():
-                return name, code
-    except (json.JSONDecodeError, KeyError, AttributeError):
-        pass
+        return ast.literal_eval(param_value)
+    except Exception:
+        return param_value
+
+
+def parse_tool_call(text: str, tools: list[dict] | None = None) -> tuple[str, str] | None:
+    """Parse the SGLang `qwen3_coder` tool-call format from model output."""
+    if "<tool_call>" not in text:
+        return None
+
+    raw_tool_calls = _TOOL_CALL_RE.findall(text)
+    if not raw_tool_calls and "<function=" in text:
+        raw_tool_calls = [text]
+
+    for tool_content in raw_tool_calls:
+        funcs = _TOOL_CALL_FUNCTION_RE.findall(tool_content)
+        for func_match in funcs:
+            func_body = func_match[0] or func_match[1]
+            if ">" not in func_body:
+                continue
+            name_end = func_body.index(">")
+            func_name = func_body[:name_end]
+            params_str = func_body[name_end + 1 :]
+
+            param_config = _get_arguments_config(func_name, tools)
+            parsed_params = {}
+            for p_match in _TOOL_CALL_PARAMETER_RE.findall(params_str):
+                if ">" not in p_match:
+                    continue
+                p_idx = p_match.index(">")
+                p_name = p_match[:p_idx]
+                p_val = p_match[p_idx + 1 :]
+                if p_val.startswith("\n"):
+                    p_val = p_val[1:]
+                if p_val.endswith("\n"):
+                    p_val = p_val[:-1]
+                parsed_params[p_name] = _convert_param_value(p_val, p_name, param_config, func_name)
+
+            if func_name == "python":
+                code = parsed_params.get("code", "")
+                if isinstance(code, str) and code.strip():
+                    return func_name, code
+
     return None
 
 
@@ -207,7 +287,7 @@ async def generate(args, sample: Sample, sampling_params) -> Sample:
 
             # ── Parse for tool call ───────────────────────────────────
             cur_text = tokenizer.decode(cur_token_ids)
-            parsed = parse_tool_call(cur_text)
+            parsed = parse_tool_call(cur_text, tools=[tool_spec])
 
             if parsed is None:
                 # No tool call → final answer; set status from finish reason
