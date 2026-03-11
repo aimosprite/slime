@@ -23,9 +23,9 @@ IMPORTANT:
 - TOKENS ARE AT .ENV
 - sft/3.5 rollouts dataset: https://huggingface.co/datasets/aimosprite/qwen3.5-35b-eval-run-20260302) 
 - copy scripts/sft-qwen3-8b-AM-embedding-swap.sh almost line-by-line. make a config file. 
-- read CLAUDE.md, gimran-CLAUDE.md and MISTAKES.md
+- read CLAUDE.md, gimran/CLAUDE.md and MISTAKES.md
 - when mistake happens, fix them. 
-- USE EXISTING SCRIPTS, BUT CHECK THEIR CORRECTNESS. like sfacquire.sh, gimran-setup.sh, ...
+- USE EXISTING SCRIPTS, BUT CHECK THEIR CORRECTNESS. like sfacquire.sh, gimran/setup.sh, ...
 - whenever you update something, push it to github. don't push model weights or other heavy stuff
 - maintain MISTAKES.md, read from there to fix the mistakes you had. 
 - check of OOMs. 
@@ -43,5 +43,5 @@ EVERYTHING I SAID IS SUPER IMPORTANT. DON'T MISS ANYTHING ^^^
 
 
 TODO CHECH: VERY IMPORTANT
-- check that lr is not super low. 
+- check that lr is not super low. make the warmup much shorter. 
 - don't train on the full thing. 200k is enough. 

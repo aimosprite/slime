@@ -38,8 +38,13 @@ def _init(args):
     tok = load_tokenizer(args.hf_checkpoint, trust_remote_code=True)
     mask_gen = MultiTurnLossMaskGenerator(tok, tokenizer_type=args.loss_mask_type)
 
-    with open(TEST_DATA_PATH) as f:
-        rows = [json.loads(line) for line in f]
+    if TEST_DATA_PATH.endswith(".parquet"):
+        import pyarrow.parquet as pq
+        table = pq.read_table(TEST_DATA_PATH)
+        rows = table.to_pylist()
+    else:
+        with open(TEST_DATA_PATH) as f:
+            rows = [json.loads(line) for line in f]
 
     indices = random.Random(123).sample(range(len(rows)), min(NUM_TEST_CACHE, len(rows)))
     test_samples = []
@@ -57,16 +62,20 @@ def _init(args):
     logger.info(f"[eval_hook] Cached {len(test_samples)} test samples")
 
 
-def _build_batch(samples, batch_indices):
-    """Build packed THD batch from selected test samples."""
+def _build_batch(samples, batch_indices, max_total_tokens=8192):
+    """Build packed THD batch from selected test samples, capping total tokens."""
     all_tokens = []
     all_loss_masks = []
     cu_seqlens = [0]
+    total = 0
 
     for i in batch_indices:
         token_ids, loss_mask = samples[i]
+        if total + len(token_ids) > max_total_tokens and total > 0:
+            break
         all_tokens.append(torch.tensor(token_ids, dtype=torch.long))
         all_loss_masks.append(torch.tensor(loss_mask, dtype=torch.float32))
+        total += len(token_ids)
         cu_seqlens.append(cu_seqlens[-1] + len(token_ids))
 
     tokens_cat = torch.cat(all_tokens).cuda()
@@ -116,7 +125,7 @@ def eval_before_step(args, rollout_id, step_id, model, optimizer, opt_param_sche
     if is_main and _state["test_samples"]:
         samples = _state["test_samples"]
         batch_indices = random.sample(range(len(samples)), min(EVAL_BATCH_SIZE, len(samples)))
-        tokens, loss_mask, cu_seqlens, max_seqlen = _build_batch(samples, batch_indices)
+        tokens, loss_mask, cu_seqlens, max_seqlen = _build_batch(samples, batch_indices, max_total_tokens=args.seq_length)
         # Broadcast metadata: total_len and num_seqlens
         meta = torch.tensor([tokens.size(0), cu_seqlens.size(0), max_seqlen], dtype=torch.long, device="cuda")
     else:

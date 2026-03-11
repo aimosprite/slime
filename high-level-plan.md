@@ -32,8 +32,8 @@ again, make a plan. but don't forget:
 - we don't touch 32B for now. just SFT 8b on that sft dataset
 
 IMPORTANT: 
-- read CLAUDE.md, gimran-CLAUDE.md and MISTAKES.md
-- when mistake happens, fix them. 
-- USE EXISTING SCRIPTS, BUT CHECK THEIR CORRECTNESS. like sfacquire.sh, gimran-setup.sh, ...
+- read CLAUDE.md, gimran/CLAUDE.md and MISTAKES.md
+- when mistake happens, fix them.
+- USE EXISTING SCRIPTS, BUT CHECK THEIR CORRECTNESS. like sfacquire.sh, gimran/setup.sh, ...
 - whenever you update something, push it to github. don't push model weights or other heavy stuff
 - maintain MISTAKES.md, read from there to fix the mistakes you had. 

@@ -26,7 +26,6 @@ POOL_DIR="${POOL_DIR:-/root/slime/models}"
 MEGATRON_PATH="${MEGATRON_PATH:-/root/Megatron-LM}"
 
 HF_MODEL="${HF_MODEL:-openai/gpt-oss-20b}"
-HF_DATASET="${HF_DATASET:-aimosprite/qwen3.5-35b-eval-run-20260302}"
 DONOR_TOKENIZER="${DONOR_TOKENIZER:-Qwen/Qwen3.5-35B-A3B}"
 NEW_VOCAB_SIZE="${NEW_VOCAB_SIZE:-248320}"
 MODEL_NAME="${HF_MODEL##*/}"
@@ -35,12 +34,16 @@ MODEL_DIR="${POOL_DIR}/${MODEL_NAME}"
 DONOR_TOKENIZER_DIR="${POOL_DIR}/Qwen3.5-35B-A3B-tokenizer"
 SWAPPED_DIR="${POOL_DIR}/${MODEL_NAME}-qwen3.5-tokenizer"
 MEGATRON_REF_DIR="${POOL_DIR}/${MODEL_NAME}-qwen3.5-tokenizer_torch_dist"
-DATASET_PATH="${DATASET_PATH:-${POOL_DIR}/qwen35-rollouts.parquet}"
+# Canonical dataset paths — must match training script defaults
+DATASET_PATH="${DATASET_PATH:-${POOL_DIR}/am-qwen3-distilled-train.parquet}"
+TEST_DATA_PATH="${TEST_DATA_PATH:-${POOL_DIR}/am-qwen3-distilled-test.parquet}"
+# Use ~200k samples (sample-fraction=0.11 of 1.89M)
+AM_SAMPLE_FRACTION="${AM_SAMPLE_FRACTION:-0.11}"
 
 INIT_STD="${INIT_STD:-0.02}"
 INIT_SEED="${INIT_SEED:-42}"
-CONVERT_NPROC_PER_NODE="${CONVERT_NPROC_PER_NODE:-8}"
-TRANSFORMER_IMPL="${TRANSFORMER_IMPL:-local}"
+CONVERT_NPROC_PER_NODE="${CONVERT_NPROC_PER_NODE:-1}"
+TRANSFORMER_IMPL="${TRANSFORMER_IMPL:-transformer_engine}"
 
 # ======================== PREP ========================
 echo "=========================================="
@@ -80,12 +83,17 @@ else
 fi
 
 # 4. Convert HF -> Megatron torch_dist format
-if [ ! -d "${MEGATRON_REF_DIR}" ]; then
-    echo "--- Converting HF -> Megatron (nproc=${CONVERT_NPROC_PER_NODE}) ---"
+# Use python3 directly (single process, no torchrun) to avoid port conflicts.
+# Check both existence AND size (a valid 20B checkpoint is multiple GB).
+MEGATRON_REF_SIZE=$(du -sm "${MEGATRON_REF_DIR}" 2>/dev/null | awk '{print $1}')
+if [ ! -d "${MEGATRON_REF_DIR}" ] || [ "${MEGATRON_REF_SIZE:-0}" -lt 1000 ]; then
+    [ -d "${MEGATRON_REF_DIR}" ] && echo "--- Removing incomplete checkpoint (${MEGATRON_REF_SIZE:-0}MB) ---" && rm -rf "${MEGATRON_REF_DIR}"
+    echo "--- Converting HF -> Megatron (single process) ---"
     source "${SCRIPT_DIR}/models/gpt-oss-20b.sh"
     PYTHONPATH="${MEGATRON_PATH}" \
-    torchrun --nproc_per_node="${CONVERT_NPROC_PER_NODE}" \
-        "${REPO_DIR}/tools/convert_hf_to_torch_dist.py" \
+    WORLD_SIZE=1 RANK=0 LOCAL_RANK=0 \
+    MASTER_ADDR=127.0.0.1 MASTER_PORT=29600 \
+    python3 "${REPO_DIR}/tools/convert_hf_to_torch_dist.py" \
         "${MODEL_ARGS[@]}" \
         --hf-checkpoint                "${SWAPPED_DIR}" \
         --save                         "${MEGATRON_REF_DIR}" \
@@ -100,13 +108,17 @@ else
     echo "--- Megatron checkpoint already exists at ${MEGATRON_REF_DIR}, skipping ---"
 fi
 
-# 5. Download & convert dataset
+# 5. Download & convert dataset (AM-Qwen3-Distilled + Qwen3.5 rollouts)
+# Uses prep_datasets_with_splits.py which handles both datasets correctly.
+# AM sample fraction ~0.11 = ~200k of 1.89M rows (enough to learn embeddings).
 if [ ! -f "${DATASET_PATH}" ]; then
-    echo "--- Downloading & converting dataset ---"
-    python3 "${REPO_DIR}/tools/prep_qwen35_rollouts.py" \
-        --dataset "${HF_DATASET}" \
-        --output  "${DATASET_PATH}" \
-        --correct-only
+    echo "--- Downloading & converting datasets (AM fraction=${AM_SAMPLE_FRACTION}) ---"
+    python3 "${REPO_DIR}/tools/prep_datasets_with_splits.py" \
+        --output-dir   "${POOL_DIR}" \
+        --test-fraction 0.05 \
+        --seed          42 \
+        --sample-fraction "${AM_SAMPLE_FRACTION}" \
+        --skip-qwen35
 else
     echo "--- Dataset already exists at ${DATASET_PATH}, skipping ---"
 fi

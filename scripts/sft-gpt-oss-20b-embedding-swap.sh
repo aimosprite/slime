@@ -24,65 +24,37 @@ TRAIN_CONFIG="${TRAIN_CONFIG:-${REPO_DIR}/configs/sft-gpt-oss-20b-embedding-surg
 load_config "${TRAIN_CONFIG}"
 load_env "${REPO_DIR}"
 
-# ======================== DEFAULTS ========================
+# ======================== REQUIRED CONFIG (no silent defaults) ========================
+# Infrastructure — these have safe defaults tied to repo layout
 POOL_DIR="${POOL_DIR:-/root/slime/models}"
 MEGATRON_PATH="${MEGATRON_PATH:-/root/Megatron-LM}"
 RUN_LOG="${RUN_LOG:-${POOL_DIR}/run-sft-gpt-oss.log}"
-
 HF_MODEL="${HF_MODEL:-openai/gpt-oss-20b}"
 MODEL_NAME="${HF_MODEL##*/}"
 
-# Post tokenizer-swap directories (different from qwen3-8b which uses random-emb)
+# Derived paths
 SWAPPED_DIR="${POOL_DIR}/${MODEL_NAME}-qwen3.5-tokenizer"
 MEGATRON_REF_DIR="${POOL_DIR}/${MODEL_NAME}-qwen3.5-tokenizer_torch_dist"
 SLIME_DIR="${POOL_DIR}/${MODEL_NAME}-qwen3.5-tokenizer_slime"
-DATASET_PATH="${DATASET_PATH:-${POOL_DIR}/am-qwen3-distilled-train.parquet}"
-TEST_DATA_PATH="${TEST_DATA_PATH:-${POOL_DIR}/am-qwen3-distilled-test.jsonl}"
 
-INIT_STD="${INIT_STD:-0.02}"
-INIT_SEED="${INIT_SEED:-42}"
-TRAIN_PARAMS="${TRAIN_PARAMS:-embedding output_layer}"
+# All training params MUST come from the config yaml — fail loudly if missing.
+require_var() { if [ -z "${!1:-}" ]; then echo "ERROR: $1 not set. Add it to the config yaml." >&2; exit 1; fi; }
 
-NUM_EPOCH="${NUM_EPOCH:-10}"
-GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-32}"
-ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-64}"
-SAVE_INTERVAL="${SAVE_INTERVAL:-50}"
-MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-1}"
-INPUT_KEY="${INPUT_KEY:-messages}"
-LOSS_TYPE="${LOSS_TYPE:-sft_loss}"
-LOSS_MASK_TYPE="${LOSS_MASK_TYPE:-qwen3}"
-APPLY_CHAT_TEMPLATE="${APPLY_CHAT_TEMPLATE:-0}"
-TOOL_KEY="${TOOL_KEY:-tools}"
-ROLLOUT_SEED="${ROLLOUT_SEED:-42}"
-SEQ_LENGTH="${SEQ_LENGTH:-32768}"
-ROLLOUT_MAX_CONTEXT_LEN="${ROLLOUT_MAX_CONTEXT_LEN:-32768}"
-
-LR="${LR:-5e-4}"
-MIN_LR="${MIN_LR:-1e-5}"
-LR_DECAY_STYLE="${LR_DECAY_STYLE:-cosine}"
-LR_WARMUP_FRACTION="${LR_WARMUP_FRACTION:-0.05}"
-WEIGHT_DECAY="${WEIGHT_DECAY:-0.01}"
-ADAM_BETA1="${ADAM_BETA1:-0.9}"
-ADAM_BETA2="${ADAM_BETA2:-0.95}"
-CLIP_GRAD="${CLIP_GRAD:-1.0}"
-OPTIMIZER="${OPTIMIZER:-adam}"
-
-TENSOR_MODEL_PARALLEL_SIZE="${TENSOR_MODEL_PARALLEL_SIZE:-2}"
-PIPELINE_MODEL_PARALLEL_SIZE="${PIPELINE_MODEL_PARALLEL_SIZE:-1}"
-CONTEXT_PARALLEL_SIZE="${CONTEXT_PARALLEL_SIZE:-1}"
-EXPERT_MODEL_PARALLEL_SIZE="${EXPERT_MODEL_PARALLEL_SIZE:-1}"
-EXPERT_TENSOR_PARALLEL_SIZE="${EXPERT_TENSOR_PARALLEL_SIZE:-1}"
-ACTOR_NUM_NODES="${ACTOR_NUM_NODES:-1}"
-ACTOR_NUM_GPUS_PER_NODE="${ACTOR_NUM_GPUS_PER_NODE:-8}"
-
-RECOMPUTE_GRANULARITY="${RECOMPUTE_GRANULARITY:-full}"
-RECOMPUTE_METHOD="${RECOMPUTE_METHOD:-uniform}"
-RECOMPUTE_NUM_LAYERS="${RECOMPUTE_NUM_LAYERS:-1}"
-
-ATTENTION_DROPOUT="${ATTENTION_DROPOUT:-0.0}"
-HIDDEN_DROPOUT="${HIDDEN_DROPOUT:-0.0}"
-TRANSFORMER_IMPL="${TRANSFORMER_IMPL:-local}"
-ATTENTION_BACKEND="${ATTENTION_BACKEND:-unfused}"
+REQUIRED_VARS=(
+    DATASET_PATH TEST_DATA_PATH
+    INIT_STD INIT_SEED TRAIN_PARAMS
+    NUM_EPOCH GLOBAL_BATCH_SIZE ROLLOUT_BATCH_SIZE SAVE_INTERVAL MICRO_BATCH_SIZE
+    INPUT_KEY LOSS_TYPE LOSS_MASK_TYPE APPLY_CHAT_TEMPLATE TOOL_KEY ROLLOUT_SEED
+    SEQ_LENGTH ROLLOUT_MAX_CONTEXT_LEN
+    LR MIN_LR LR_DECAY_STYLE LR_WARMUP_FRACTION WEIGHT_DECAY
+    ADAM_BETA1 ADAM_BETA2 CLIP_GRAD OPTIMIZER
+    TENSOR_MODEL_PARALLEL_SIZE PIPELINE_MODEL_PARALLEL_SIZE CONTEXT_PARALLEL_SIZE
+    EXPERT_MODEL_PARALLEL_SIZE EXPERT_TENSOR_PARALLEL_SIZE
+    ACTOR_NUM_NODES ACTOR_NUM_GPUS_PER_NODE
+    RECOMPUTE_GRANULARITY RECOMPUTE_METHOD RECOMPUTE_NUM_LAYERS
+    ATTENTION_DROPOUT HIDDEN_DROPOUT TRANSFORMER_IMPL ATTENTION_BACKEND
+)
+for var in "${REQUIRED_VARS[@]}"; do require_var "$var"; done
 
 CHECKPOINT_SHIP_ENABLED="${CHECKPOINT_SHIP_ENABLED:-1}"
 CHECKPOINT_SHIP_POLL_SEC="${CHECKPOINT_SHIP_POLL_SEC:-30}"
@@ -92,7 +64,7 @@ CHECKPOINT_HF_CREATE_REPO="${CHECKPOINT_HF_CREATE_REPO:-1}"
 
 WANDB_PROJECT="${WANDB_PROJECT:-slime-dev}"
 WANDB_GROUP="${WANDB_GROUP:-gpt-oss-20b-embedding-surgery}"
-WANDB_KEY="${WANDB_KEY:-${WANDB_API_KEY:-}}"
+WANDB_KEY="${WANDB_KEY:-${WANDB_API_KEY:-${WANDB_TOKEN:-}}}"
 USE_WANDB="${USE_WANDB:-1}"
 if [ -n "${WANDB_KEY}" ] && [ "${#WANDB_KEY}" -lt 40 ]; then
     echo "WARNING: WANDB_KEY is only ${#WANDB_KEY} chars (need 40+). WandB logging disabled."
@@ -109,7 +81,7 @@ DO_PREP="${DO_PREP:-0}"
 if [ "${DO_PREP}" = "1" ]; then
     bash "${SCRIPT_DIR}/prep-gpt-oss-embedding-surgery.sh" || exit 1
 else
-    echo "--- Verifying artifacts ---"
+    echo "--- Verifying artifacts (DO_PREP=0) ---"
     MISSING=0
     for required in "${SWAPPED_DIR}" "${MEGATRON_REF_DIR}"; do
         if [ ! -d "${required}" ]; then
@@ -122,19 +94,10 @@ else
         MISSING=1
     fi
     if [ "${MISSING}" = "1" ]; then
-        echo "Run with DO_PREP=1 to create missing artifacts."
+        echo "Run with DO_PREP=1 (or set do_prep: 1 in config) to create missing artifacts."
         exit 1
     fi
     echo "All artifacts present."
-
-    if [ -z "${WANDB_KEY}" ]; then
-        echo "WARNING: WANDB_KEY not set. WandB logging will be disabled."
-        USE_WANDB=0
-    fi
-    if [ ! -d "${MEGATRON_PATH}" ]; then
-        echo "ERROR: Megatron-LM not found at ${MEGATRON_PATH}."
-        exit 1
-    fi
 fi
 
 # ======================== KILL LEFTOVERS ========================
@@ -260,6 +223,10 @@ MISC_ARGS=(
     --no-gradient-accumulation-fusion
     --seq-length                    "${SEQ_LENGTH}"
 )
+# --no-persist-layer-norm required when transformer_impl=local (mistake #21)
+if [ "${TRANSFORMER_IMPL}" = "local" ]; then
+    MISC_ARGS+=(--no-persist-layer-norm)
+fi
 
 # ======================== LAUNCH ========================
 

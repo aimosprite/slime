@@ -24,7 +24,7 @@ load_config() {
 import sys, re, os
 for line in open(sys.argv[1]):
     line = line.split('#')[0].strip()
-    m = re.match(r'^([a-z_]+):\s*(\S.*)', line)
+    m = re.match(r'^([a-z0-9_]+):\s*(\S.*)', line)
     if m:
         k, v = m.group(1).upper(), m.group(2).strip()
         if k not in os.environ:

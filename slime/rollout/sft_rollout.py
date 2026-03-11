@@ -39,35 +39,52 @@ def generate_rollout(args, rollout_id, data_buffer, evaluation=False):
     if MASK_GENERATOR is None:
         MASK_GENERATOR = MultiTurnLossMaskGenerator(TOKENIZER, tokenizer_type=args.loss_mask_type)
 
-    samples = data_buffer.get_samples(args.rollout_batch_size)
+    target = args.rollout_batch_size
     max_len = args.seq_length
+    fetch_size = target
     filtered = []
+    total_fetched = 0
+    total_skipped = 0
 
-    for i, sample in enumerate(samples):
-        (sample,) = sample
-        messages = sample.prompt
-        tools = sample.metadata.get("tools", None)
+    while len(filtered) < target:
+        samples = data_buffer.get_samples(fetch_size)
+        total_fetched += len(samples)
 
-        token_ids, loss_mask = MASK_GENERATOR.get_loss_mask(messages, tools=tools)
+        for sample in samples:
+            (sample,) = sample
+            messages = sample.prompt
+            tools = sample.metadata.get("tools", None)
 
-        # Filter out sequences that exceed seq_length
-        if len(token_ids) > max_len:
-            continue
+            token_ids, loss_mask = MASK_GENERATOR.get_loss_mask(messages, tools=tools)
 
-        response_length = MASK_GENERATOR.get_response_lengths([loss_mask])[0]
+            if len(token_ids) > max_len:
+                total_skipped += 1
+                continue
 
-        sample.tokens = token_ids
-        sample.response_length = response_length
-        sample.reward = 0
-        sample.loss_mask = loss_mask[-response_length:]
+            response_length = MASK_GENERATOR.get_response_lengths([loss_mask])[0]
 
-        if not SAMPLE_PRINTED:
-            logger.info(
-                f"sft_rollout::generate_rollout example data: {sample=} (raw){messages=} (raw){token_ids=} (raw){loss_mask=} {response_length=}"
-            )
-            SAMPLE_PRINTED = True
+            sample.tokens = token_ids
+            sample.response_length = response_length
+            sample.reward = 0
+            sample.loss_mask = loss_mask[-response_length:]
 
-        filtered.append(sample)
+            if not SAMPLE_PRINTED:
+                logger.info(
+                    f"sft_rollout::generate_rollout example data: {sample=} (raw){messages=} (raw){token_ids=} (raw){loss_mask=} {response_length=}"
+                )
+                SAMPLE_PRINTED = True
 
-    logger.info(f"sft_rollout: kept {len(filtered)}/{len(samples)} samples (filtered {len(samples)-len(filtered)} > {max_len} tokens)")
+            filtered.append(sample)
+            if len(filtered) >= target:
+                break
+
+        # Next fetch: estimate how many more we need based on pass rate so far
+        if total_fetched > 0 and total_skipped > 0:
+            pass_rate = (total_fetched - total_skipped) / total_fetched
+            remaining = target - len(filtered)
+            fetch_size = max(remaining, int(remaining / max(pass_rate, 0.1)))
+        else:
+            fetch_size = target - len(filtered)
+
+    logger.info(f"sft_rollout: collected {len(filtered)} samples (fetched {total_fetched}, skipped {total_skipped} > {max_len} tokens)")
     return filtered

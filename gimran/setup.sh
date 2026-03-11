@@ -1,10 +1,11 @@
 #!/bin/bash
 set -e
 
-# Always run from repo root (where this script lives)
-cd "$(dirname "$0")"
-SLIME_DIR="$(pwd)"
-ROOT_DIR="$(dirname "$SLIME_DIR")"
+# setup.sh lives in gimran/ — repo root is one level up
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SLIME_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"   # /root/slime
+ROOT_DIR="$(dirname "$SLIME_DIR")"             # /root
+cd "${SLIME_DIR}"
 
 export MEGATRON_COMMIT="3714d81d418c9f1bca4594fc35f9e8289f652862"
 export SGLANG_COMMIT="24c91001cf99ba642be791e099d358f4dfe955f5"
@@ -93,6 +94,18 @@ fi
 [ -f "$HOME/.local/bin/env" ] && source "$HOME/.local/bin/env"
 echo "uv: $(uv --version)"
 
+echo "=== setting up .env (secrets) ==="
+if [ ! -f "${SLIME_DIR}/.env" ]; then
+    read -rp "HF_TOKEN: " _hf_token
+    read -rp "WANDB_TOKEN: " _wandb_token
+    printf "HF_TOKEN=%s\nWANDB_TOKEN=%s\n" "${_hf_token}" "${_wandb_token}" > "${SLIME_DIR}/.env"
+    echo "Created .env"
+else
+    echo ".env already exists, skipping"
+fi
+# Source so tokens are available for the rest of this script (model downloads, etc.)
+set -a; source "${SLIME_DIR}/.env"; set +a
+
 echo "=== installing hf CLI (huggingface-hub) ==="
 if command -v hf &>/dev/null; then
     echo "hf already installed"
@@ -105,16 +118,20 @@ echo "=== upgrading CuDNN (fix PyTorch 2.9.1 compatibility) ==="
 uv pip install --system "nvidia-cudnn-cu12==9.16.0.29"
 echo "installed nvidia-cudnn-cu12==9.16.0.29"
 
-echo "=== installing CUDA toolkit (nvcc for JIT compilation) ==="
-if [ -f /usr/local/cuda-12.8/bin/nvcc ]; then
-    echo "cuda-nvcc-12-8 already installed"
-else
+echo "=== installing CUDA toolkit (full dev headers for TE/apex compilation) ==="
+if ! dpkg -s cuda-toolkit-12-8 &>/dev/null; then
     wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb -O /tmp/cuda-keyring.deb
     dpkg -i /tmp/cuda-keyring.deb
     apt-get update -qq
-    apt-get install -y -qq cuda-nvcc-12-8
-    echo "installed cuda-nvcc-12-8"
+    apt-get install -y -qq cuda-toolkit-12-8
+    echo "installed cuda-toolkit-12-8"
+else
+    echo "cuda-toolkit-12-8 already installed"
 fi
+# Symlink cudnn + nccl headers from pip packages into CUDA include dir (needed for TE/apex)
+ln -sf /usr/local/lib/python3.10/dist-packages/nvidia/cudnn/include/* /usr/local/cuda-12.8/include/ 2>/dev/null || true
+ln -sf /usr/local/lib/python3.10/dist-packages/nvidia/cudnn/lib/libcudnn* /usr/local/cuda-12.8/lib64/ 2>/dev/null || true
+ln -sf /usr/local/lib/python3.10/dist-packages/nvidia/nccl/include/* /usr/local/cuda-12.8/include/ 2>/dev/null || true
 
 echo "=== installing gh (GitHub CLI) ==="
 if command -v gh &>/dev/null; then
@@ -132,7 +149,14 @@ echo "=== gh auth login ==="
 if gh auth status &>/dev/null; then
     echo "gh already authenticated"
 else
-    gh auth login
+    read -rsp "GitHub token (leave empty to skip): " _github_token
+    echo ""
+    if [ -n "${_github_token}" ]; then
+        echo "${_github_token}" | gh auth login --with-token
+        echo "gh authenticated via token"
+    else
+        echo "Skipping gh auth (no token provided)"
+    fi
 fi
 
 echo "=== configuring git identity ==="
@@ -187,8 +211,35 @@ python3 -c "import torch; print(torch.__version__)" 2>/dev/null || \
     uv pip install --system torch==2.9.1 torchvision==0.24.1 torchaudio==2.9.1 \
         --index-url https://download.pytorch.org/whl/cu129
 
-echo "=== installing flash-attn ==="
-MAX_JOBS=$(nproc) uv pip install --system flash-attn==2.7.4.post1 --no-build-isolation
+echo "=== installing flash-attn (compiling from source, ~10-20 min) ==="
+MAX_JOBS=$(nproc) uv pip install --system flash-attn==2.7.4.post1 --no-build-isolation &
+FA_PID=$!
+
+# Show a progress bar by counting compiled .o files vs total .cu files
+BUILD_TEMP=""
+for i in $(seq 1 60); do
+    sleep 2
+    BUILD_TEMP=$(find /root/.cache/uv -path "*/flash-attn*/temp.*" -type d 2>/dev/null | head -1)
+    [ -n "$BUILD_TEMP" ] && break
+done
+
+if [ -n "$BUILD_TEMP" ]; then
+    FA_SRC=$(echo "$BUILD_TEMP" | sed 's|/build/temp.*||')
+    TOTAL=$(find "$FA_SRC/csrc" -name "*.cu" 2>/dev/null | wc -l)
+    [ "$TOTAL" -eq 0 ] && TOTAL=200
+    while kill -0 $FA_PID 2>/dev/null; do
+        DONE=$(find "$BUILD_TEMP" -name "*.o" 2>/dev/null | wc -l)
+        PCT=$(( DONE * 100 / TOTAL ))
+        [ $PCT -gt 100 ] && PCT=100
+        FILLED=$(( PCT / 2 ))
+        BAR=$(printf '%0.s#' $(seq 1 $FILLED))
+        printf "\r  [%-50s] %3d%% (%d/%d files)" "$BAR" "$PCT" "$DONE" "$TOTAL"
+        sleep 3
+    done
+    printf "\r  [##################################################] 100%% (%d/%d files)\n" "$TOTAL" "$TOTAL"
+fi
+
+wait $FA_PID || { echo "ERROR: flash-attn build failed"; exit 1; }
 
 echo "=== installing ML training stack ==="
 uv pip install --system \

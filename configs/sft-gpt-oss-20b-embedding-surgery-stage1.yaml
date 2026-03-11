@@ -5,13 +5,18 @@
 experiment_name:    gpt-oss-20b-embedding-surgery-stage1
 experiment_version: 0
 
-pool_dir:   /root/slime/models
-hf_model:   openai/gpt-oss-20b
-hf_dataset: a-m-team/AM-Qwen3-Distilled
-run_log:    /root/slime/models/run-sft-gpt-oss-stage1.log
+pool_dir:      /root/slime/models
+megatron_path: /root/Megatron-LM
+hf_model:      openai/gpt-oss-20b
+run_log:       /root/slime/models/run-sft-gpt-oss-stage1.log
 
-do_prep:               0
+do_prep:                1
 convert_nproc_per_node: 1
+
+# Dataset paths
+dataset_path:      /root/slime/models/am-qwen3-distilled-train.parquet
+test_data_path:    /root/slime/models/am-qwen3-distilled-test.parquet
+am_sample_fraction: 0.11
 
 # Tokenizer swap config
 donor_tokenizer: Qwen/Qwen3.5-35B-A3B
@@ -32,10 +37,14 @@ rollout_seed:        42
 seq_length:              4096
 rollout_max_context_len: 4096
 
+# Eval (test-loss hook)
+eval_interval:  1
+eval_batch_size: 4
+
 # Training — 1.89M traces, 1 epoch should be enough to learn embeddings
 num_epoch:          1
-global_batch_size:  128
-rollout_batch_size: 512
+global_batch_size:  32
+rollout_batch_size: 32
 micro_batch_size:   1
 save_interval:      100
 
@@ -50,14 +59,14 @@ optimizer:          adam
 lr:                 5e-4
 min_lr:             1e-5
 lr_decay_style:     cosine
-lr_warmup_fraction: 0.005
+lr_warmup_fraction: 0.01
 weight_decay:       0.01
 clip_grad:          1.0
 adam_beta1:         0.9
 adam_beta2:         0.95
 
 # Parallelism — TP=2, 8 GPUs → DP=4
-tensor_model_parallel_size:  4
+tensor_model_parallel_size:  2
 pipeline_model_parallel_size: 1
 context_parallel_size:       1
 expert_model_parallel_size:  1
@@ -88,3 +97,7 @@ checkpoint_hf_create_repo: 1
 # WandB
 wandb_project: slime-dev
 wandb_group:   gpt-oss-20b-embedding-surgery-stage1
+
+# Ray
+master_addr:               127.0.0.1
+ray_memory_usage_threshold: 0.99
