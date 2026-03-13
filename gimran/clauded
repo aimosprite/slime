@@ -1,0 +1,25 @@
+#!/bin/bash
+# clauded — runs Claude Code as non-root aimo user for sandboxed execution.
+# Usage: clauded [claude args...]
+
+if [ "$(id -u)" -eq 0 ]; then
+    # Sync latest claude config to aimo user
+    if [ -d /root/.claude ]; then
+        cp -r /root/.claude /home/aimo/.claude
+        chown -R aimo:aimo /home/aimo/.claude
+    fi
+
+    # Make repo accessible to aimo
+    chmod o+x /root
+    REPO_DIR="${PWD}"
+    chgrp -R aimo "${REPO_DIR}" 2>/dev/null || true
+    chmod -R g+rwX "${REPO_DIR}" 2>/dev/null || true
+
+    # Build env passthrough
+    SUDO_ENV=(IS_SANDBOX=1)
+    [ -n "$ANTHROPIC_API_KEY" ] && SUDO_ENV+=(ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY")
+
+    exec sudo -u aimo "${SUDO_ENV[@]}" claude --dangerously-skip-permissions "$@"
+else
+    exec env IS_SANDBOX=1 claude --dangerously-skip-permissions "$@"
+fi

@@ -1,338 +1,115 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-# setup.sh lives in gimran/ — repo root is one level up
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SLIME_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"   # /root/slime
-ROOT_DIR="$(dirname "$SLIME_DIR")"             # /root
-cd "${SLIME_DIR}"
+# setup.sh — one-command setup for a fresh GPU node.
+#
+# What it does:
+#   1. Installs Docker + NVIDIA container toolkit (host-level, ~2 min)
+#   2. Builds the gimran image from slimerl/slime:latest (~3 min)
+#   3. Launches the container and runs first-boot init (secrets, git, models)
+#
+# After this, you're inside a container with everything working.
+# No compilation, no version conflicts, no dependency hell.
+#
+# Usage:
+#   bash gimran/setup.sh          # full setup + interactive shell
+#   bash gimran/setup.sh --shell  # skip setup, just enter container
+#   bash gimran/setup.sh --build  # just rebuild the image
 
-export MEGATRON_COMMIT="3714d81d418c9f1bca4594fc35f9e8289f652862"
-export SGLANG_COMMIT="24c91001cf99ba642be791e099d358f4dfe955f5"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-# Suppress interactive prompts from apt (needrestart, daemon restart dialogs)
+IMAGE="${IMAGE:-slimerl/gimran:latest}"
+
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
 
-echo "=== installing base dependencies ==="
-apt-get update -qq && apt-get install -y -qq curl git wget sudo python3-dev python3-pip
-
-echo "=== installing node.js ==="
-if command -v node &>/dev/null; then
-    echo "node already installed: $(node --version)"
-else
-    curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-    apt-get install -y -qq nodejs
-    echo "installed: $(node --version)"
-fi
-
-echo "=== installing claude code ==="
-if command -v claude &>/dev/null; then
-    echo "claude already installed: $(claude --version)"
-else
-    npm install -g @anthropic-ai/claude-code
-    echo "installed: $(claude --version)"
-fi
-
-echo "=== setting up clauded (non-root user for --dangerously-skip-permissions) ==="
-if ! id aimo &>/dev/null; then
-    useradd -m -s /bin/bash aimo
-    echo "aimo ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
-    echo "created user 'aimo' with passwordless sudo"
-else
-    echo "user 'aimo' already exists"
-fi
-# Copy config to aimo user
-cp -r /root/.claude /home/aimo/.claude 2>/dev/null || true
-mkdir -p /home/aimo/.local/bin
-[ -f /root/.local/bin/env ] && cp /root/.local/bin/env /home/aimo/.local/bin/env
-chown -R aimo:aimo /home/aimo/
-
-# Make repo accessible to aimo user
-# /root is 700 by default — aimo needs +x to traverse into /root/slime
-chmod o+x /root
-REPO_DIR="$(pwd)"
-chgrp -R aimo "$REPO_DIR"
-chmod -R g+rwX "$REPO_DIR"
-
-# Install clauded as a script in PATH (preserves TTY via sudo -u)
-cat > /usr/local/bin/clauded <<'SCRIPT'
-#!/bin/bash
-if [ "$(id -u)" -eq 0 ]; then
-    # Sync latest claude config to aimo user
-    if [ -d /root/.claude ]; then
-        cp -r /root/.claude /home/aimo/.claude
-        chown -R aimo:aimo /home/aimo/.claude
+# ── 1. Install Docker ────────────────────────────────────────────
+install_docker() {
+    if command -v docker >/dev/null 2>&1; then
+        echo "[1/4] Docker already installed, skipping."
+        return 0
     fi
 
-    # Build env passthrough
-    SUDO_ENV=(IS_SANDBOX=1)
-    [ -n "$ANTHROPIC_API_KEY" ] && SUDO_ENV+=(ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY")
-
-    exec sudo -u aimo "${SUDO_ENV[@]}" claude --dangerously-skip-permissions "$@"
-else
-    exec env IS_SANDBOX=1 claude --dangerously-skip-permissions "$@"
-fi
-SCRIPT
-chmod +x /usr/local/bin/clauded
-echo "installed /usr/local/bin/clauded"
-
-# Clean up old .bashrc function/alias if present
-for rc in /root/.bashrc /home/aimo/.bashrc; do
-    sed -i '/clauded()/,/^}/d' "$rc" 2>/dev/null || true
-    sed -i '/alias clauded=/d' "$rc" 2>/dev/null || true
-done
-
-echo "=== installing uv ==="
-if command -v uv &>/dev/null; then
-    echo "uv already installed: $(uv --version)"
-else
-    curl -LsSf https://astral.sh/uv/install.sh | sh
-    echo "installed uv"
-fi
-# Always source so uv is available for the rest of this script
-[ -f "$HOME/.local/bin/env" ] && source "$HOME/.local/bin/env"
-echo "uv: $(uv --version)"
-
-echo "=== setting up .env (secrets) ==="
-if [ ! -f "${SLIME_DIR}/.env" ]; then
-    read -rp "HF_TOKEN: " _hf_token
-    read -rp "WANDB_TOKEN: " _wandb_token
-    printf "HF_TOKEN=%s\nWANDB_TOKEN=%s\n" "${_hf_token}" "${_wandb_token}" > "${SLIME_DIR}/.env"
-    echo "Created .env"
-else
-    echo ".env already exists, skipping"
-fi
-# Source so tokens are available for the rest of this script (model downloads, etc.)
-set -a; source "${SLIME_DIR}/.env"; set +a
-
-echo "=== installing hf CLI (huggingface-hub) ==="
-if command -v hf &>/dev/null; then
-    echo "hf already installed"
-else
-    uv pip install --system "huggingface-hub[cli]"
-    echo "installed hf"
-fi
-
-echo "=== upgrading CuDNN (fix PyTorch 2.9.1 compatibility) ==="
-uv pip install --system "nvidia-cudnn-cu12==9.16.0.29"
-echo "installed nvidia-cudnn-cu12==9.16.0.29"
-
-echo "=== installing CUDA toolkit (full dev headers for TE/apex compilation) ==="
-if ! dpkg -s cuda-toolkit-12-8 &>/dev/null; then
-    wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb -O /tmp/cuda-keyring.deb
-    dpkg -i /tmp/cuda-keyring.deb
+    echo "[1/4] Installing Docker..."
     apt-get update -qq
-    apt-get install -y -qq cuda-toolkit-12-8
-    echo "installed cuda-toolkit-12-8"
-else
-    echo "cuda-toolkit-12-8 already installed"
-fi
-# Symlink cudnn + nccl headers from pip packages into CUDA include dir (needed for TE/apex)
-ln -sf /usr/local/lib/python3.10/dist-packages/nvidia/cudnn/include/* /usr/local/cuda-12.8/include/ 2>/dev/null || true
-ln -sf /usr/local/lib/python3.10/dist-packages/nvidia/cudnn/lib/libcudnn* /usr/local/cuda-12.8/lib64/ 2>/dev/null || true
-ln -sf /usr/local/lib/python3.10/dist-packages/nvidia/nccl/include/* /usr/local/cuda-12.8/include/ 2>/dev/null || true
+    apt-get install -y -qq docker.io curl ca-certificates gnupg
+}
 
-echo "=== installing gh (GitHub CLI) ==="
-if command -v gh &>/dev/null; then
-    echo "gh already installed: $(gh --version | head -1)"
-else
-    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-        | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-        | tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-    apt-get update -qq && apt-get install -y -qq gh
-    echo "installed: $(gh --version | head -1)"
-fi
-
-echo "=== gh auth login ==="
-if gh auth status &>/dev/null; then
-    echo "gh already authenticated"
-else
-    read -rsp "GitHub token (leave empty to skip): " _github_token
-    echo ""
-    if [ -n "${_github_token}" ]; then
-        echo "${_github_token}" | gh auth login --with-token
-        echo "gh authenticated via token"
-    else
-        echo "Skipping gh auth (no token provided)"
+# ── 2. NVIDIA container toolkit ──────────────────────────────────
+install_nvidia_toolkit() {
+    if dpkg -s nvidia-container-toolkit >/dev/null 2>&1; then
+        echo "[2/4] NVIDIA container toolkit already installed, skipping."
+        return 0
     fi
-fi
 
-echo "=== configuring git identity ==="
-if [ -z "$(git config --global user.name)" ]; then
-    GH_NAME=$(gh api user --jq '.name' 2>/dev/null || true)
-    GH_ID=$(gh api user --jq '.id' 2>/dev/null || true)
-    GH_LOGIN=$(gh api user --jq '.login' 2>/dev/null || true)
+    echo "[2/4] Installing NVIDIA container toolkit..."
+    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | \
+        gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
 
-    read -rp "Git name [${GH_NAME}]: " INPUT_NAME
-    git config --global user.name "${INPUT_NAME:-$GH_NAME}"
+    curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+        sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+        tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
 
-    DEFAULT_EMAIL="${GH_ID}+${GH_LOGIN}@users.noreply.github.com"
-    read -rp "Git email [${DEFAULT_EMAIL}]: " INPUT_EMAIL
-    git config --global user.email "${INPUT_EMAIL:-$DEFAULT_EMAIL}"
+    apt-get update -qq
+    apt-get install -y -qq nvidia-container-toolkit
+    nvidia-ctk runtime configure --runtime=docker
+    systemctl restart docker
+}
 
-    echo "git identity set to: $(git config --global user.name) <$(git config --global user.email)>"
-else
-    echo "git identity already configured: $(git config --global user.name) <$(git config --global user.email)>"
-fi
-
-echo "=== cloning slime ==="
-if [ ! -d "${ROOT_DIR}/slime" ]; then
-    git clone https://github.com/aimosprite/slime.git "${ROOT_DIR}/slime"
-else
-    echo "slime/ already exists, skipping"
-fi
-
-echo "=== installing Megatron-LM (pinned commit + patch) ==="
-if [ ! -d "${ROOT_DIR}/Megatron-LM" ]; then
-    git clone https://github.com/NVIDIA/Megatron-LM.git --recursive "${ROOT_DIR}/Megatron-LM"
-fi
-cd "${ROOT_DIR}/Megatron-LM"
-git checkout ${MEGATRON_COMMIT}
-git checkout -- .
-git apply "${SLIME_DIR}/docker/patch/latest/megatron.patch"
-uv pip install --system -e .
-cd "${SLIME_DIR}"
-
-echo "=== installing sglang (pinned commit + patch) ==="
-if [ ! -d "${ROOT_DIR}/sglang" ]; then
-    git clone https://github.com/sgl-project/sglang.git "${ROOT_DIR}/sglang"
-fi
-cd "${ROOT_DIR}/sglang"
-git checkout ${SGLANG_COMMIT}
-git checkout -- .
-git apply "${SLIME_DIR}/docker/patch/latest/sglang.patch" || true
-uv pip install --system -e "python[all]"
-cd "${SLIME_DIR}"
-
-echo "=== installing PyTorch ==="
-python3 -c "import torch; print(torch.__version__)" 2>/dev/null || \
-    uv pip install --system torch==2.9.1 torchvision==0.24.1 torchaudio==2.9.1 \
-        --index-url https://download.pytorch.org/whl/cu129
-
-echo "=== installing flash-attn (compiling from source, ~10-20 min) ==="
-MAX_JOBS=$(nproc) uv pip install --system flash-attn==2.7.4.post1 --no-build-isolation &
-FA_PID=$!
-
-# Show a progress bar by counting compiled .o files vs total .cu files
-BUILD_TEMP=""
-for i in $(seq 1 60); do
-    sleep 2
-    BUILD_TEMP=$(find /root/.cache/uv -path "*/flash-attn*/temp.*" -type d 2>/dev/null | head -1)
-    [ -n "$BUILD_TEMP" ] && break
-done
-
-if [ -n "$BUILD_TEMP" ]; then
-    FA_SRC=$(echo "$BUILD_TEMP" | sed 's|/build/temp.*||')
-    TOTAL=$(find "$FA_SRC/csrc" -name "*.cu" 2>/dev/null | wc -l)
-    [ "$TOTAL" -eq 0 ] && TOTAL=200
-    while kill -0 $FA_PID 2>/dev/null; do
-        DONE=$(find "$BUILD_TEMP" -name "*.o" 2>/dev/null | wc -l)
-        PCT=$(( DONE * 100 / TOTAL ))
-        [ $PCT -gt 100 ] && PCT=100
-        FILLED=$(( PCT / 2 ))
-        BAR=$(printf '%0.s#' $(seq 1 $FILLED))
-        printf "\r  [%-50s] %3d%% (%d/%d files)" "$BAR" "$PCT" "$DONE" "$TOTAL"
-        sleep 3
-    done
-    printf "\r  [##################################################] 100%% (%d/%d files)\n" "$TOTAL" "$TOTAL"
-fi
-
-wait $FA_PID || { echo "ERROR: flash-attn build failed"; exit 1; }
-
-echo "=== installing ML training stack ==="
-uv pip install --system \
-    "mbridge @ git+https://github.com/ISEEKYAN/mbridge.git@89eb10887887bc74853f89a4de258c0702932a1c" \
-    --no-deps
-uv pip install --system --no-build-isolation "transformer_engine[pytorch]==2.10.0"
-NVCC_APPEND_FLAGS="--threads 4" \
-    uv pip install --system --no-build-isolation \
-    --config-settings "--build-option=--cpp_ext --cuda_ext --parallel 8" \
-    "apex @ git+https://github.com/NVIDIA/apex.git@10417aceddd7d5d05d7cbf7b0fc2daad1105f8b4"
-uv pip install --system \
-    "git+https://github.com/fzyzcjy/torch_memory_saver.git@dc6876905830430b5054325fa4211ff302169c6b" \
-    --force-reinstall
-uv pip install --system "git+https://github.com/fzyzcjy/Megatron-Bridge.git@dev_rl" --no-build-isolation
-uv pip install --system "nvidia-modelopt[torch]>=0.37.0" --no-build-isolation
-uv pip install --system flash-linear-attention==0.4.0
-uv pip install --system einops
-uv pip install --system "numpy<2"
-uv pip install --system cmake ninja
-
-echo "=== installing slime ==="
-uv pip install --system -e .
-
-echo "=== downloading models ==="
-mkdir -p models
-
-MODELS_FILE="${SLIME_DIR}/models.txt"
-if [ ! -f "$MODELS_FILE" ]; then
-    echo "FATAL: models.txt not found at $MODELS_FILE" >&2
-    exit 1
-fi
-
-# Read models from models.txt (skip comments and blank lines)
-hf_ids=()
-local_dirs=()
-while IFS= read -r line; do
-    line="${line%%#*}"            # strip comments
-    line="$(echo "$line" | xargs)" # trim whitespace
-    [[ -z "$line" ]] && continue
-    hf_id="$(echo "$line" | awk '{print $1}')"
-    local_dir="$(echo "$line" | awk '{print $2}')"
-    hf_ids+=("$hf_id")
-    local_dirs+=("$local_dir")
-done < "$MODELS_FILE"
-
-if [ ${#hf_ids[@]} -eq 0 ]; then
-    echo "No models found in models.txt"
-else
-    echo "Available models (from models.txt):"
-    missing=()
-    for i in "${!hf_ids[@]}"; do
-        if [ -d "models/${local_dirs[$i]}" ]; then
-            printf "  [%d] %-35s -> models/%-25s \e[32mOK\e[0m\n" "$((i+1))" "${hf_ids[$i]}" "${local_dirs[$i]}"
-        else
-            printf "  [%d] %-35s -> models/%-25s \e[33mMISSING\e[0m\n" "$((i+1))" "${hf_ids[$i]}" "${local_dirs[$i]}"
-            missing+=("$((i+1))")
-        fi
-    done
-    echo ""
-
-    if [ ${#missing[@]} -eq 0 ]; then
-        echo "All models already downloaded."
-    else
-        echo "Enter model numbers to download (space-separated), 'all' missing, or 'none':"
-        read -rp "> " model_choice
-
-        download_model() {
-            local idx=$1
-            if [ -d "models/${local_dirs[$idx]}" ]; then
-                echo "--- models/${local_dirs[$idx]} already exists, skipping ---"
-                return
-            fi
-            echo "--- Downloading ${hf_ids[$idx]} -> models/${local_dirs[$idx]} ---"
-            hf download "${hf_ids[$idx]}" --local-dir "models/${local_dirs[$idx]}"
-        }
-
-        if [[ "$model_choice" == "none" || -z "$model_choice" ]]; then
-            echo "Skipping model downloads."
-        elif [[ "$model_choice" == "all" ]]; then
-            for i in "${!hf_ids[@]}"; do
-                download_model "$i"
-            done
-        else
-            for num in $model_choice; do
-                idx=$((num - 1))
-                if (( idx < 0 || idx >= ${#hf_ids[@]} )); then
-                    echo "WARNING: invalid choice '$num', skipping"
-                    continue
-                fi
-                download_model "$idx"
-            done
-        fi
+# ── 3. Verify GPU passthrough ────────────────────────────────────
+verify_gpu() {
+    echo "[3/4] Verifying Docker GPU passthrough..."
+    if ! docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi; then
+        echo "GPU passthrough failed. Check NVIDIA driver and container toolkit."
+        exit 1
     fi
-fi
+    echo "GPU passthrough OK."
+}
 
-echo "=== done ==="
+# ── 4. Build gimran image ────────────────────────────────────────
+build_image() {
+    echo "[4/4] Building gimran image (on top of slimerl/slime:latest)..."
+    echo "  This pulls the base image (~15 GB) and adds gimran tools (~3 min)."
+    docker build -f "${SCRIPT_DIR}/Dockerfile" "${REPO_DIR}" -t "${IMAGE}"
+    echo "Image built: ${IMAGE}"
+}
+
+# ── Parse args ───────────────────────────────────────────────────
+case "${1:-}" in
+    --shell)
+        exec bash "${SCRIPT_DIR}/docker-run.sh"
+        ;;
+    --build)
+        build_image
+        exit 0
+        ;;
+    --help|-h)
+        cat <<EOF
+Usage:
+  bash gimran/setup.sh          # full setup + interactive shell
+  bash gimran/setup.sh --shell  # skip setup, just enter container
+  bash gimran/setup.sh --build  # just rebuild the image
+EOF
+        exit 0
+        ;;
+esac
+
+# ── Full setup ───────────────────────────────────────────────────
+echo "=== gimran setup ==="
+echo "  REPO_DIR=${REPO_DIR}"
+echo ""
+
+install_docker
+install_nvidia_toolkit
+verify_gpu
+build_image
+
+echo ""
+echo "========================================="
+echo "Host setup complete. Entering container..."
+echo "========================================="
+echo ""
+
+# Launch container with first-boot init
+exec bash "${SCRIPT_DIR}/docker-run.sh" init
