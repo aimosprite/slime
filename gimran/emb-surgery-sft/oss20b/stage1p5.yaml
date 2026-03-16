@@ -1,0 +1,106 @@
+# Stage 1.5: Resume embedding + boundary layer training from step 299
+# Trains embedding, output_layer, AND first/last transformer layers (0, 23).
+# Resumes from HF checkpoint: aimosprite/gpt-oss-20b-embedding-surgery (iter 299)
+# Previous run: https://wandb.ai/aimosprite/slime-dev/runs/5pmajcpv (crashed at ~709, test/loss ~5.1)
+
+experiment_name:    gpt-oss-20b-embedding-surgery-stage1p5
+experiment_version: 1
+
+pool_dir:      /root/slime/models
+megatron_path: /root/Megatron-LM
+hf_model:      openai/gpt-oss-20b
+run_log:       /root/slime/models/run-sft-gpt-oss-stage1p5.log
+
+do_prep:                1
+convert_nproc_per_node: 1
+
+# Dataset paths
+dataset_path:      /root/slime/models/am-qwen3-distilled-train.parquet
+test_data_path:    /root/slime/models/am-qwen3-distilled-test.parquet
+am_sample_fraction: 0.11
+
+# Tokenizer swap config
+donor_tokenizer: Qwen/Qwen3.5-35B-A3B
+new_vocab_size:  248320
+init_std:        0.02
+init_seed:       42
+
+# Trainable params — embedding + output + first/last transformer layers
+train_params:    embedding output_layer decoder.layers.0 decoder.layers.23
+
+# Data config
+input_key:           messages
+loss_mask_type:      qwen3
+apply_chat_template: 0
+tool_key:            tools
+rollout_shuffle:     1
+rollout_seed:        43
+
+# Sequence length
+seq_length:              4096
+rollout_max_context_len: 4096
+
+# Eval (test-loss hook)
+eval_interval:  1
+eval_batch_size: 4
+
+# Training
+num_epoch:          1
+global_batch_size:  64
+rollout_batch_size: 64
+micro_batch_size:   1
+save_interval:      50
+
+# Loss
+loss_type:                              sft_loss
+calculate_per_token_loss:               1
+disable_compute_advantages_and_returns: 1
+debug_train_only:                       1
+
+# Optimizer
+optimizer:          adam
+lr:                 5e-4
+min_lr:             1e-5
+lr_decay_style:     cosine
+lr_warmup_fraction: 0.01
+weight_decay:       0.01
+clip_grad:          1.0
+adam_beta1:         0.9
+adam_beta2:         0.95
+
+# Parallelism — TP=2, 8 GPUs → DP=4
+tensor_model_parallel_size:  2
+pipeline_model_parallel_size: 1
+context_parallel_size:       1
+expert_model_parallel_size:  1
+expert_tensor_parallel_size: 1
+actor_num_nodes:             1
+actor_num_gpus_per_node:     8
+
+# Recompute
+recompute_granularity: full
+recompute_method:      uniform
+recompute_num_layers:  1
+
+# Dropout
+attention_dropout: 0.0
+hidden_dropout:    0.0
+
+# Impl
+transformer_impl:  transformer_engine
+attention_backend: flash
+
+# Checkpoint shipping
+checkpoint_ship_enabled:   1
+checkpoint_ship_poll_sec:  30
+checkpoint_hf_repo_id:     aimosprite/gpt-oss-20b-embedding-surgery
+checkpoint_hf_private:     0
+checkpoint_hf_create_repo: 1
+
+# WandB
+wandb_project: slime-dev
+wandb_group:   gpt-oss-20b-embedding-surgery-stage1p5
+
+# Ray
+master_addr:               127.0.0.1
+ray_memory_usage_threshold: 0.99

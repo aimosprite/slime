@@ -13,12 +13,13 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
-REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+EMB_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REPO_DIR="$(cd "${EMB_DIR}/../.." && pwd)"
 
 # ======================== LOAD CONFIG ========================
-source "${SCRIPT_DIR}/lib/config.sh"
+source "${EMB_DIR}/lib/config.sh"
 
-TRAIN_CONFIG="${TRAIN_CONFIG:-${REPO_DIR}/configs/sft-qwen3-8b-embedding-surgery.yaml}"
+TRAIN_CONFIG="${TRAIN_CONFIG:-${SCRIPT_DIR}/config.yaml}"
 load_config "${TRAIN_CONFIG}"
 load_env "${REPO_DIR}"
 
@@ -56,7 +57,7 @@ fi
 # 2. Randomize embed_tokens + lm_head
 if [ ! -d "${RANDOM_EMB_DIR}" ]; then
     echo "--- Randomizing embeddings (std=${INIT_STD}, seed=${INIT_SEED}) ---"
-    python3 "${REPO_DIR}/tools/randomize_embeddings.py" \
+    python3 "${SCRIPT_DIR}/randomize_embeddings.py" \
         --input-dir  "${MODEL_DIR}" \
         --output-dir "${RANDOM_EMB_DIR}" \
         --init-std   "${INIT_STD}" \
@@ -68,7 +69,7 @@ fi
 # 3. Convert HF -> Megatron torch_dist format
 if [ ! -d "${MEGATRON_REF_DIR}" ]; then
     echo "--- Converting HF -> Megatron (nproc=${CONVERT_NPROC_PER_NODE}) ---"
-    source "${SCRIPT_DIR}/models/qwen3-8B.sh"
+    source "${REPO_DIR}/scripts/models/qwen3-8B.sh"
     PYTHONPATH="${MEGATRON_PATH}" \
     torchrun --nproc_per_node="${CONVERT_NPROC_PER_NODE}" \
         "${REPO_DIR}/tools/convert_hf_to_torch_dist.py" \
@@ -89,7 +90,7 @@ fi
 # 4. Download & convert dataset
 if [ ! -f "${DATASET_PATH}" ]; then
     echo "--- Downloading & converting dataset ---"
-    python3 "${REPO_DIR}/tools/prep_am_dataset.py" \
+    python3 "${SCRIPT_DIR}/prep_am_dataset.py" \
         --dataset "${HF_DATASET}" \
         --output  "${DATASET_PATH}"
 else

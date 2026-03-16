@@ -1,0 +1,47 @@
+# Phase 1: 12.4% trainable warmup — get to loss ~7, save checkpoint
+# Then switch to phase2.yaml for 100% trainable
+
+train_params: embedding output_layer decoder.layers.0 decoder.layers.23
+seq_length: 8192
+global_batch_size: 64
+rollout_batch_size: 64
+micro_batch_size: 1
+num_epoch: 1
+save_interval: 50
+rollout_seed: 43
+
+# Optimizer
+lr: 5e-4
+min_lr: 1e-5
+lr_decay_style: cosine
+lr_warmup_fraction: 0.01
+weight_decay: 0.01
+clip_grad: 1.0
+adam_beta1: 0.9
+adam_beta2: 0.95
+cpu_offload: false
+
+# Parallelism
+tp: 2
+pp: 1
+cp: 1
+ep: 1
+etp: 1
+
+# Data
+input_key: messages
+loss_mask_type: qwen3
+apply_chat_template: false
+tool_key: tools
+
+# Eval
+eval_interval: 1
+eval_batch_size: 4
+
+# WandB
+wandb_project: slime-dev
+wandb_group: gpt-oss-20b-emb-surgery-phase1
+
+# Checkpoint
+checkpoint_hf_repo_id: aimosprite/gpt-oss-20b-embedding-surgery
+no_load_optim: false

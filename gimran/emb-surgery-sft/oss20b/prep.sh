@@ -1,23 +1,24 @@
 #!/bin/bash
 # =============================================================================
-# prep-gpt-oss-embedding-surgery.sh — Download, tokenizer swap, dequant, convert, dataset
+# prep-gpt-oss.sh — Download, tokenizer swap, dequant, convert, dataset
 #
 # Idempotent: skips steps whose outputs already exist.
 #
 # Usage:
-#   bash scripts/prep-gpt-oss-embedding-surgery.sh
-#   TRAIN_CONFIG=my.yaml bash scripts/prep-gpt-oss-embedding-surgery.sh
+#   bash gimran/emb-surgery-sft/scripts/prep-gpt-oss.sh
+#   TRAIN_CONFIG=my.yaml bash gimran/emb-surgery-sft/scripts/prep-gpt-oss.sh
 # =============================================================================
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
-REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+EMB_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REPO_DIR="$(cd "${EMB_DIR}/../.." && pwd)"
 
 # ======================== LOAD CONFIG ========================
-source "${SCRIPT_DIR}/lib/config.sh"
+source "${EMB_DIR}/lib/config.sh"
 
-TRAIN_CONFIG="${TRAIN_CONFIG:-${REPO_DIR}/configs/sft-gpt-oss-20b-embedding-surgery.yaml}"
+TRAIN_CONFIG="${TRAIN_CONFIG:-${SCRIPT_DIR}/stage1.yaml}"
 load_config "${TRAIN_CONFIG}"
 load_env "${REPO_DIR}"
 
@@ -71,7 +72,7 @@ fi
 # 3. Tokenizer swap + MXFP4 dequant + embedding resize
 if [ ! -d "${SWAPPED_DIR}" ] || [ ! -f "${SWAPPED_DIR}/config.json" ]; then
     echo "--- Tokenizer swap + dequant (std=${INIT_STD}, seed=${INIT_SEED}) ---"
-    python3 "${REPO_DIR}/tools/tokenizer_swap.py" \
+    python3 "${SCRIPT_DIR}/tokenizer_swap.py" \
         --input-dir          "${MODEL_DIR}" \
         --donor-tokenizer-dir "${DONOR_TOKENIZER_DIR}" \
         --output-dir         "${SWAPPED_DIR}" \
@@ -89,7 +90,7 @@ MEGATRON_REF_SIZE=$(du -sm "${MEGATRON_REF_DIR}" 2>/dev/null | awk '{print $1}')
 if [ ! -d "${MEGATRON_REF_DIR}" ] || [ "${MEGATRON_REF_SIZE:-0}" -lt 1000 ]; then
     [ -d "${MEGATRON_REF_DIR}" ] && echo "--- Removing incomplete checkpoint (${MEGATRON_REF_SIZE:-0}MB) ---" && rm -rf "${MEGATRON_REF_DIR}"
     echo "--- Converting HF -> Megatron (single process) ---"
-    source "${SCRIPT_DIR}/models/gpt-oss-20b.sh"
+    source "${REPO_DIR}/scripts/models/gpt-oss-20b.sh"
     PYTHONPATH="${MEGATRON_PATH}" \
     WORLD_SIZE=1 RANK=0 LOCAL_RANK=0 \
     MASTER_ADDR=127.0.0.1 MASTER_PORT=29600 \
@@ -113,7 +114,7 @@ fi
 # AM sample fraction ~0.11 = ~200k of 1.89M rows (enough to learn embeddings).
 if [ ! -f "${DATASET_PATH}" ]; then
     echo "--- Downloading & converting datasets (AM fraction=${AM_SAMPLE_FRACTION}) ---"
-    python3 "${REPO_DIR}/tools/prep_datasets_with_splits.py" \
+    python3 "${SCRIPT_DIR}/prep_datasets_with_splits.py" \
         --output-dir   "${POOL_DIR}" \
         --test-fraction 0.05 \
         --seed          42 \

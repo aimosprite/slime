@@ -1,100 +1,72 @@
 #!/bin/bash
 # =============================================================================
-# Embedding Surgery SFT: Qwen3-8B with randomized embeddings
+# Embedding Surgery SFT: GPT-OSS-20b with Qwen3.5 tokenizer swap
 #
-# Experiment: Take Qwen3-8B, randomize embed_tokens + lm_head weights,
-# then SFT on AM-Qwen3-Distilled (1.89M reasoning traces from Qwen3-235B-A22B).
-# Only train embedding + output layers; transformer is frozen.
+# Experiment: Take GPT-OSS-20b, swap tokenizer to Qwen3.5 (vocab 201088→248320),
+# dequantize MXFP4→bf16, randomize embed_tokens + lm_head, then SFT on
+# Qwen3.5-35B-A3B distilled rollouts. Only train embedding + output layers.
 #
 # Usage:
-#   bash scripts/sft-qwen3-8b-AM-embedding-swap.sh             # train (prep must be done)
-#   DO_PREP=1 bash scripts/sft-qwen3-8b-AM-embedding-swap.sh   # prep + train
+#   bash scripts/sft-gpt-oss-20b-embedding-swap.sh             # train (prep must be done)
+#   DO_PREP=1 bash scripts/sft-gpt-oss-20b-embedding-swap.sh   # prep + train
 #
-# Config:  configs/sft-qwen3-8b-embedding-surgery.yaml  (all params, documented)
-# Secrets: .env  (WANDB_KEY, HF_TOKEN — never commit these)
+# Config:  configs/sft-gpt-oss-20b-embedding-surgery.yaml
+# Secrets: .env  (WANDB_KEY, HF_TOKEN)
 # =============================================================================
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
-REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+EMB_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REPO_DIR="$(cd "${EMB_DIR}/../.." && pwd)"
 
 # ======================== CONFIG + SECRETS ========================
-source "${SCRIPT_DIR}/lib/config.sh"
+source "${EMB_DIR}/lib/config.sh"
 
-TRAIN_CONFIG="${TRAIN_CONFIG:-${REPO_DIR}/configs/sft-qwen3-8b-embedding-surgery.yaml}"
+TRAIN_CONFIG="${TRAIN_CONFIG:-${SCRIPT_DIR}/stage1.yaml}"
 load_config "${TRAIN_CONFIG}"
 load_env "${REPO_DIR}"
 
-# ======================== DEFAULTS ========================
+# ======================== REQUIRED CONFIG (no silent defaults) ========================
+# Infrastructure — these have safe defaults tied to repo layout
 POOL_DIR="${POOL_DIR:-/root/slime/models}"
-MEGATRON_PATH="${MEGATRON_PATH:-${REPO_DIR}/Megatron-LM}"
-RUN_LOG="${RUN_LOG:-${POOL_DIR}/run-sft.log}"
-
-HF_MODEL="${HF_MODEL:-Qwen/Qwen3-8B}"
-HF_DATASET="${HF_DATASET:-a-m-team/AM-Qwen3-Distilled}"
+MEGATRON_PATH="${MEGATRON_PATH:-/root/Megatron-LM}"
+RUN_LOG="${RUN_LOG:-${POOL_DIR}/run-sft-gpt-oss.log}"
+HF_MODEL="${HF_MODEL:-openai/gpt-oss-20b}"
 MODEL_NAME="${HF_MODEL##*/}"
 
-MODEL_DIR="${POOL_DIR}/${MODEL_NAME}"
-RANDOM_EMB_DIR="${POOL_DIR}/${MODEL_NAME}-random-emb"
-MEGATRON_REF_DIR="${POOL_DIR}/${MODEL_NAME}-random-emb_torch_dist"
-SLIME_DIR="${POOL_DIR}/${MODEL_NAME}-random-emb_slime"
-DATASET_PATH="${DATASET_PATH:-${POOL_DIR}/am-qwen3-distilled.parquet}"
+# Derived paths
+SWAPPED_DIR="${POOL_DIR}/${MODEL_NAME}-qwen3.5-tokenizer"
+MEGATRON_REF_DIR="${POOL_DIR}/${MODEL_NAME}-qwen3.5-tokenizer_torch_dist"
+SLIME_DIR="${POOL_DIR}/${MODEL_NAME}-qwen3.5-tokenizer_slime"
 
-INIT_STD="${INIT_STD:-0.02}"
-INIT_SEED="${INIT_SEED:-42}"
-TRAIN_PARAMS="${TRAIN_PARAMS:-embedding output_layer}"
+# All training params MUST come from the config yaml — fail loudly if missing.
+require_var() { if [ -z "${!1:-}" ]; then echo "ERROR: $1 not set. Add it to the config yaml." >&2; exit 1; fi; }
 
-NUM_EPOCH="${NUM_EPOCH:-1}"
-GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-128}"
-ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-128}"
-SAVE_INTERVAL="${SAVE_INTERVAL:-500}"
-MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-1}"
-INPUT_KEY="${INPUT_KEY:-messages}"
-LOSS_TYPE="${LOSS_TYPE:-sft_loss}"
-LOSS_MASK_TYPE="${LOSS_MASK_TYPE:-qwen3}"
-APPLY_CHAT_TEMPLATE="${APPLY_CHAT_TEMPLATE:-0}"
-TOOL_KEY="${TOOL_KEY:-tools}"
-ROLLOUT_SEED="${ROLLOUT_SEED:-42}"
-SEQ_LENGTH="${SEQ_LENGTH:-8192}"
-ROLLOUT_MAX_CONTEXT_LEN="${ROLLOUT_MAX_CONTEXT_LEN:-8192}"
-
-LR="${LR:-5e-4}"
-MIN_LR="${MIN_LR:-1e-5}"
-LR_DECAY_STYLE="${LR_DECAY_STYLE:-cosine}"
-LR_WARMUP_FRACTION="${LR_WARMUP_FRACTION:-0.05}"
-WEIGHT_DECAY="${WEIGHT_DECAY:-0.01}"
-ADAM_BETA1="${ADAM_BETA1:-0.9}"
-ADAM_BETA2="${ADAM_BETA2:-0.95}"
-CLIP_GRAD="${CLIP_GRAD:-1.0}"
-OPTIMIZER="${OPTIMIZER:-adam}"
-
-TENSOR_MODEL_PARALLEL_SIZE="${TENSOR_MODEL_PARALLEL_SIZE:-1}"
-PIPELINE_MODEL_PARALLEL_SIZE="${PIPELINE_MODEL_PARALLEL_SIZE:-1}"
-CONTEXT_PARALLEL_SIZE="${CONTEXT_PARALLEL_SIZE:-1}"
-EXPERT_MODEL_PARALLEL_SIZE="${EXPERT_MODEL_PARALLEL_SIZE:-1}"
-EXPERT_TENSOR_PARALLEL_SIZE="${EXPERT_TENSOR_PARALLEL_SIZE:-1}"
-ACTOR_NUM_NODES="${ACTOR_NUM_NODES:-1}"
-ACTOR_NUM_GPUS_PER_NODE="${ACTOR_NUM_GPUS_PER_NODE:-8}"
-
-RECOMPUTE_GRANULARITY="${RECOMPUTE_GRANULARITY:-full}"
-RECOMPUTE_METHOD="${RECOMPUTE_METHOD:-uniform}"
-RECOMPUTE_NUM_LAYERS="${RECOMPUTE_NUM_LAYERS:-1}"
-
-ATTENTION_DROPOUT="${ATTENTION_DROPOUT:-0.0}"
-HIDDEN_DROPOUT="${HIDDEN_DROPOUT:-0.0}"
-TRANSFORMER_IMPL="${TRANSFORMER_IMPL:-local}"
-ATTENTION_BACKEND="${ATTENTION_BACKEND:-flash}"
+REQUIRED_VARS=(
+    DATASET_PATH TEST_DATA_PATH
+    INIT_STD INIT_SEED TRAIN_PARAMS
+    NUM_EPOCH GLOBAL_BATCH_SIZE ROLLOUT_BATCH_SIZE SAVE_INTERVAL MICRO_BATCH_SIZE
+    INPUT_KEY LOSS_TYPE LOSS_MASK_TYPE APPLY_CHAT_TEMPLATE TOOL_KEY ROLLOUT_SEED
+    SEQ_LENGTH ROLLOUT_MAX_CONTEXT_LEN
+    LR MIN_LR LR_DECAY_STYLE LR_WARMUP_FRACTION WEIGHT_DECAY
+    ADAM_BETA1 ADAM_BETA2 CLIP_GRAD OPTIMIZER
+    TENSOR_MODEL_PARALLEL_SIZE PIPELINE_MODEL_PARALLEL_SIZE CONTEXT_PARALLEL_SIZE
+    EXPERT_MODEL_PARALLEL_SIZE EXPERT_TENSOR_PARALLEL_SIZE
+    ACTOR_NUM_NODES ACTOR_NUM_GPUS_PER_NODE
+    RECOMPUTE_GRANULARITY RECOMPUTE_METHOD RECOMPUTE_NUM_LAYERS
+    ATTENTION_DROPOUT HIDDEN_DROPOUT TRANSFORMER_IMPL ATTENTION_BACKEND
+)
+for var in "${REQUIRED_VARS[@]}"; do require_var "$var"; done
 
 CHECKPOINT_SHIP_ENABLED="${CHECKPOINT_SHIP_ENABLED:-1}"
 CHECKPOINT_SHIP_POLL_SEC="${CHECKPOINT_SHIP_POLL_SEC:-30}"
-CHECKPOINT_HF_REPO_ID="${CHECKPOINT_HF_REPO_ID:-aimosprite/qwen3-32b-to-8b-embedding-surgery}"
+CHECKPOINT_HF_REPO_ID="${CHECKPOINT_HF_REPO_ID:-aimosprite/gpt-oss-20b-embedding-surgery}"
 CHECKPOINT_HF_PRIVATE="${CHECKPOINT_HF_PRIVATE:-0}"
 CHECKPOINT_HF_CREATE_REPO="${CHECKPOINT_HF_CREATE_REPO:-1}"
 
 WANDB_PROJECT="${WANDB_PROJECT:-slime-dev}"
-WANDB_GROUP="${WANDB_GROUP:-qwen3-8b-embedding-surgery}"
-WANDB_KEY="${WANDB_KEY:-${WANDB_API_KEY:-}}"
+WANDB_GROUP="${WANDB_GROUP:-gpt-oss-20b-embedding-surgery}"
+WANDB_KEY="${WANDB_KEY:-${WANDB_API_KEY:-${WANDB_TOKEN:-}}}"
 USE_WANDB="${USE_WANDB:-1}"
-# Validate wandb key length (must be 40+ chars)
 if [ -n "${WANDB_KEY}" ] && [ "${#WANDB_KEY}" -lt 40 ]; then
     echo "WARNING: WANDB_KEY is only ${#WANDB_KEY} chars (need 40+). WandB logging disabled."
     USE_WANDB=0
@@ -108,12 +80,11 @@ print_config
 # ======================== PREP (idempotent) ========================
 DO_PREP="${DO_PREP:-0}"
 if [ "${DO_PREP}" = "1" ]; then
-    bash "${SCRIPT_DIR}/prep-embedding-surgery.sh" || exit 1
+    bash "${SCRIPT_DIR}/prep.sh" || exit 1
 else
-    # Verify artifacts exist even when skipping prep
-    echo "--- Verifying artifacts ---"
+    echo "--- Verifying artifacts (DO_PREP=0) ---"
     MISSING=0
-    for required in "${RANDOM_EMB_DIR}" "${MEGATRON_REF_DIR}"; do
+    for required in "${SWAPPED_DIR}" "${MEGATRON_REF_DIR}"; do
         if [ ! -d "${required}" ]; then
             echo "MISSING DIR:  ${required}"
             MISSING=1
@@ -124,20 +95,10 @@ else
         MISSING=1
     fi
     if [ "${MISSING}" = "1" ]; then
-        echo "Run with DO_PREP=1 to create missing artifacts."
+        echo "Run with DO_PREP=1 (or set do_prep: 1 in config) to create missing artifacts."
         exit 1
     fi
     echo "All artifacts present."
-
-    if [ -z "${WANDB_KEY}" ]; then
-        echo "WARNING: WANDB_KEY (or WANDB_API_KEY) not set. WandB logging will be disabled."
-        USE_WANDB=0
-    fi
-    if [ ! -d "${MEGATRON_PATH}" ]; then
-        echo "ERROR: Megatron-LM not found at ${MEGATRON_PATH}."
-        echo "       Run: git clone https://github.com/NVIDIA/Megatron-LM.git ${MEGATRON_PATH}"
-        exit 1
-    fi
 fi
 
 # ======================== KILL LEFTOVERS ========================
@@ -161,7 +122,7 @@ fi
 echo "HAS_NVLINK: ${HAS_NVLINK} (detected ${NVLINK_COUNT} NVLink references)"
 
 # ======================== HF CHECKPOINT SHIPPING ========================
-source "${SCRIPT_DIR}/lib/hf_shipper.sh"
+source "${EMB_DIR}/lib/hf_shipper.sh"
 if [ "${CHECKPOINT_SHIP_ENABLED}" = "1" ]; then
     hf_login || exit 1
     preflight_hf || exit 1
@@ -169,12 +130,12 @@ if [ "${CHECKPOINT_SHIP_ENABLED}" = "1" ]; then
 fi
 
 # ======================== MODEL ARGS ========================
-source "${SCRIPT_DIR}/models/qwen3-8B.sh"
+source "${REPO_DIR}/scripts/models/gpt-oss-20b.sh"
 
 # ======================== TRAINING ARGS ========================
 
 CKPT_ARGS=(
-    --hf-checkpoint "${RANDOM_EMB_DIR}"
+    --hf-checkpoint "${SWAPPED_DIR}"
     --ref-load      "${MEGATRON_REF_DIR}"
     --load          "${SLIME_DIR}/"
     --save          "${SLIME_DIR}/"
@@ -249,9 +210,9 @@ if [ -n "${TEST_DATA_PATH:-}" ] && [ -f "${TEST_DATA_PATH}" ]; then
     EVAL_HOOK_ARGS=(
         --custom-megatron-before-train-step-hook-path slime.hooks.eval_hook.eval_before_step
     )
-    echo "=== Test-loss eval hook ENABLED (every ${EVAL_INTERVAL:-50} steps) ==="
+    echo "=== Test-loss eval hook ENABLED ==="
 else
-    echo "=== Test-loss eval hook DISABLED (TEST_DATA_PATH not set or file missing) ==="
+    echo "=== Test-loss eval hook DISABLED ==="
 fi
 
 MISC_ARGS=(
@@ -263,6 +224,10 @@ MISC_ARGS=(
     --no-gradient-accumulation-fusion
     --seq-length                    "${SEQ_LENGTH}"
 )
+# --no-persist-layer-norm required when transformer_impl=local (mistake #21)
+if [ "${TRANSFORMER_IMPL}" = "local" ]; then
+    MISC_ARGS+=(--no-persist-layer-norm)
+fi
 
 # ======================== LAUNCH ========================
 
