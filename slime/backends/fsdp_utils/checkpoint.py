@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -203,6 +204,11 @@ def save(actor: Any, iteration: int) -> None:
     lr_scheduler_dir = checkpoint_dir / "lr_scheduler"
 
     if dist.get_rank() == 0:
+        # Re-running into an existing iteration directory is fragile with torch.save():
+        # stale rng.pt / metadata from a prior failed attempt can trip inline_container
+        # errors during overwrite. Start each save from a clean directory instead.
+        if checkpoint_dir.exists():
+            shutil.rmtree(checkpoint_dir)
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
         model_dir.mkdir(parents=True, exist_ok=True)
         optimizer_dir.mkdir(parents=True, exist_ok=True)
@@ -230,7 +236,9 @@ def save(actor: Any, iteration: int) -> None:
     if dist.get_rank() == 0:
         rng_state = {"torch": torch.get_rng_state()}
         rng_state["cuda"] = torch.cuda.get_rng_state_all()
-        torch.save(rng_state, checkpoint_dir / "rng.pt")
+        rng_tmp = checkpoint_dir / "rng.pt.tmp"
+        torch.save(rng_state, rng_tmp)
+        rng_tmp.replace(checkpoint_dir / "rng.pt")
 
         metadata = {
             "iteration": step_id,
