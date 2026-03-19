@@ -31,6 +31,14 @@ from .update_weight_utils import UpdateWeightFromDistributed, UpdateWeightFromTe
 logger = logging.getLogger(__name__)
 
 
+def _fsdp_model_dtype(args):
+    return torch.float16 if args.fp16 else torch.bfloat16
+
+
+def _enable_logprob_compile() -> bool:
+    return os.environ.get("SLIME_ENABLE_LOGPROB_COMPILE", "0") == "1"
+
+
 class FSDPTrainRayActor(TrainRayActor):
     """Simplified TrainRayActor for pure HF+FSDP training.
 
@@ -94,6 +102,7 @@ class FSDPTrainRayActor(TrainRayActor):
                 self.args.hf_checkpoint,
                 trust_remote_code=True,
                 attn_implementation=self.args.attn_implementation,
+                torch_dtype=_fsdp_model_dtype(self.args),
             )
 
         model.train()
@@ -780,6 +789,7 @@ class FSDPTrainRayActor(TrainRayActor):
                     ref_load_path,
                     trust_remote_code=True,
                     attn_implementation=self.args.attn_implementation,
+                    torch_dtype=_fsdp_model_dtype(self.args),
                 )
 
             full_state = ref_model.state_dict()
@@ -824,7 +834,10 @@ def selective_log_softmax_raw(logits: torch.Tensor, input_ids: torch.Tensor) -> 
     return torch.gather(logprobs, dim=-1, index=input_ids.unsqueeze(-1)).squeeze(-1)
 
 
-selective_log_softmax_compiled = torch.compile(dynamic=True)(selective_log_softmax_raw)
+if _enable_logprob_compile():
+    selective_log_softmax_compiled = torch.compile(dynamic=True)(selective_log_softmax_raw)
+else:
+    selective_log_softmax_compiled = selective_log_softmax_raw
 
 
 def gather_log_probs_packed(

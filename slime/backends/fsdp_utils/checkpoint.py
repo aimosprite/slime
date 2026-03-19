@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import time
 from pathlib import Path
@@ -10,10 +11,25 @@ from typing import Any
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
-from torch.distributed.checkpoint.state_dict import get_state_dict, set_state_dict
+from huggingface_hub import save_torch_state_dict
+from safetensors.torch import load_file
+from torch.distributed.checkpoint.state_dict import (
+    StateDictOptions,
+    get_optimizer_state_dict,
+    get_state_dict,
+    set_optimizer_state_dict,
+    set_state_dict,
+)
 from torch.distributed.checkpoint.stateful import Stateful
+from torch.distributed.tensor import DTensor, Replicate
 
 logger = logging.getLogger(__name__)
+
+
+MODEL_INDEX = "model.safetensors.index.json"
+MODEL_SINGLE = "model.safetensors"
+OPTIMIZER_FILE = "optimizer.pt"
+LR_SCHEDULER_FILE = "lr_scheduler.pt"
 
 
 class ModelState(Stateful):
@@ -76,6 +92,56 @@ def _write_checkpoint_metadata(path: Path, metadata: dict[str, Any]) -> None:
     tmp_path.replace(path)
 
 
+def _materialize_state_value(value: Any) -> Any:
+    if not torch.is_tensor(value):
+        return value
+
+    tensor = value
+    if isinstance(tensor, DTensor):
+        tensor = tensor.redistribute(placements=[Replicate()] * tensor.device_mesh.ndim, async_op=True).to_local()
+        if hasattr(tensor, "wait"):
+            tensor = tensor.wait()
+
+    return tensor.detach().cpu().contiguous()
+
+
+def _collect_full_model_state_dict(model: torch.nn.Module) -> dict[str, Any] | None:
+    full_state: dict[str, Any] = {} if dist.get_rank() == 0 else None
+    for name, value in model.state_dict().items():
+        materialized = _materialize_state_value(value)
+        if full_state is not None:
+            full_state[name] = materialized
+    return full_state
+
+
+def _load_local_model_state_dict(model_dir: Path) -> dict[str, Any]:
+    index_path = model_dir / MODEL_INDEX
+    single_path = model_dir / MODEL_SINGLE
+
+    if index_path.exists():
+        weight_map = json.loads(index_path.read_text()).get("weight_map", {})
+        state_dict: dict[str, Any] = {}
+        for shard_name in sorted(set(weight_map.values())):
+            state_dict.update(load_file(model_dir / shard_name, device="cpu"))
+        return state_dict
+
+    if single_path.exists():
+        return load_file(single_path, device="cpu")
+
+    raise FileNotFoundError(f"No local safetensors checkpoint found under {model_dir}")
+
+
+def _has_checkpoint_payload(path: Path) -> bool:
+    if not path.exists() or not path.is_dir():
+        return False
+    for child in path.iterdir():
+        if child.is_file():
+            return True
+        if child.is_dir() and any(grandchild.is_file() for grandchild in child.iterdir()):
+            return True
+    return False
+
+
 def load(actor: Any) -> dict[str, Any] | None:
     """Load checkpoint from disk.
 
@@ -109,39 +175,69 @@ def load(actor: Any) -> dict[str, Any] | None:
         logger.info(f"[FSDP] Model checkpoint {model_dir} not found; skipping load.")
         return None
 
-    # Load model weights (always)
-    model_state = ModelState(actor.model)
-    state_dict = {"model_state": model_state}
+    local_model_exists = (model_dir / MODEL_INDEX).exists() or (model_dir / MODEL_SINGLE).exists()
+    if local_model_exists:
+        try:
+            full_state = _load_local_model_state_dict(model_dir) if dist.get_rank() == 0 else {}
+            actor.model = actor._fsdp2_load_full_state_dict(
+                actor.model,
+                full_state,
+                actor.dp_mesh,
+                cpu_offload=True if getattr(actor, "fsdp_cpu_offload", False) else None,
+            )
+            logger.info(f"[FSDP] Loaded local model from {model_dir}")
+        except Exception as e:
+            logger.error(f"[FSDP] Failed to load local model from {model_dir}: {e}")
+            return None
+    else:
+        model_state = ModelState(actor.model)
+        state_dict = {"model_state": model_state}
 
-    try:
-        dcp.load(state_dict=state_dict, checkpoint_id=str(model_dir))
-        logger.info(f"[FSDP] Loaded model from {model_dir}")
-    except Exception as e:
-        logger.error(f"[FSDP] Failed to load model from {model_dir}: {e}")
-        return None
+        try:
+            dcp.load(state_dict=state_dict, checkpoint_id=str(model_dir))
+            logger.info(f"[FSDP] Loaded model from {model_dir}")
+        except Exception as e:
+            logger.error(f"[FSDP] Failed to load model from {model_dir}: {e}")
+            return None
 
     # Load optimizer state (optional)
     load_optimizer = not getattr(actor.args, "no_load_optim", False) and hasattr(actor, "optimizer")
-    if load_optimizer and optimizer_dir.exists():
+    local_optimizer_file = optimizer_dir / OPTIMIZER_FILE
+    if load_optimizer and local_optimizer_file.exists():
+        try:
+            optim_state = torch.load(local_optimizer_file, map_location="cpu", weights_only=False)
+            options = StateDictOptions(full_state_dict=True, cpu_offload=True, broadcast_from_rank0=True)
+            set_optimizer_state_dict(actor.model, actor.optimizer, optim_state, options=options)
+            logger.info(f"[FSDP] Loaded optimizer from {local_optimizer_file}")
+        except Exception as e:
+            logger.warning(f"[FSDP] Failed to load optimizer from {local_optimizer_file}: {e}")
+    elif load_optimizer and _has_checkpoint_payload(optimizer_dir):
         optimizer_state = OptimizerState(actor.model, actor.optimizer)
         optim_state_dict = {"optim_state": optimizer_state}
         try:
             dcp.load(state_dict=optim_state_dict, checkpoint_id=str(optimizer_dir))
             logger.info(f"[FSDP] Loaded optimizer from {optimizer_dir}")
-        except Exception as e:
+        except BaseException as e:
             logger.warning(f"[FSDP] Failed to load optimizer from {optimizer_dir}: {e}")
     elif load_optimizer:
         logger.info(f"[FSDP] Optimizer checkpoint not found at {optimizer_dir}, skipping optimizer load.")
 
     # Load LR scheduler state (optional)
-    load_lr_scheduler = hasattr(actor, "lr_scheduler") and lr_scheduler_dir.exists()
-    if load_lr_scheduler:
+    local_lr_scheduler_file = lr_scheduler_dir / LR_SCHEDULER_FILE
+    load_lr_scheduler = hasattr(actor, "lr_scheduler") and _has_checkpoint_payload(lr_scheduler_dir)
+    if load_lr_scheduler and local_lr_scheduler_file.exists():
+        try:
+            actor.lr_scheduler.load_state_dict(torch.load(local_lr_scheduler_file, map_location="cpu", weights_only=False))
+            logger.info(f"[FSDP] Loaded LR scheduler from {local_lr_scheduler_file}")
+        except Exception as e:
+            logger.warning(f"[FSDP] Failed to load LR scheduler from {local_lr_scheduler_file}: {e}")
+    elif load_lr_scheduler:
         lr_scheduler_state = LRSchedulerState(actor.lr_scheduler)
         lr_scheduler_state_dict = {"lr_scheduler_state": lr_scheduler_state}
         try:
             dcp.load(state_dict=lr_scheduler_state_dict, checkpoint_id=str(lr_scheduler_dir))
             logger.info(f"[FSDP] Loaded LR scheduler from {lr_scheduler_dir}")
-        except Exception as e:
+        except BaseException as e:
             logger.warning(f"[FSDP] Failed to load LR scheduler from {lr_scheduler_dir}: {e}")
     elif hasattr(actor, "lr_scheduler"):
         logger.info(f"[FSDP] LR scheduler checkpoint not found at {lr_scheduler_dir}, skipping LR scheduler load.")
@@ -215,23 +311,33 @@ def save(actor: Any, iteration: int) -> None:
         lr_scheduler_dir.mkdir(parents=True, exist_ok=True)
     dist.barrier()
 
-    # Save model weights
-    model_state = ModelState(actor.model)
-    state_dict = {"model_state": model_state}
-    dcp.save(state_dict, checkpoint_id=str(model_dir))
+    model_state = _collect_full_model_state_dict(actor.model)
+    if dist.get_rank() == 0:
+        save_torch_state_dict(
+            model_state,
+            model_dir,
+            filename_pattern="model{suffix}.safetensors",
+            safe_serialization=True,
+            max_shard_size=os.environ.get("SLIME_FSDP_MAX_SHARD_SIZE", "5GB"),
+        )
+    del model_state
+    dist.barrier()
 
     # Save optimizer state (skip if --no-save-optim is set)
     save_optimizer_state = not getattr(actor.args, "no_save_optim", False)
     if save_optimizer_state and hasattr(actor, "optimizer") and actor.optimizer is not None:
-        optimizer_state = OptimizerState(actor.model, actor.optimizer)
-        optim_state_dict = {"optim_state": optimizer_state}
-        dcp.save(optim_state_dict, checkpoint_id=str(optimizer_dir))
+        try:
+            options = StateDictOptions(full_state_dict=True, cpu_offload=True)
+            optimizer_state = get_optimizer_state_dict(actor.model, actor.optimizer, options=options)
+            if dist.get_rank() == 0:
+                torch.save(optimizer_state, optimizer_dir / OPTIMIZER_FILE)
+        except Exception as e:
+            logger.warning(f"[FSDP] Failed to save optimizer state to {optimizer_dir}: {e}")
 
     # Save LR scheduler state (skip if --no-save-optim is set)
     if save_optimizer_state and hasattr(actor, "lr_scheduler") and actor.lr_scheduler is not None:
-        lr_scheduler_state = LRSchedulerState(actor.lr_scheduler)
-        lr_scheduler_state_dict = {"lr_scheduler_state": lr_scheduler_state}
-        dcp.save(lr_scheduler_state_dict, checkpoint_id=str(lr_scheduler_dir))
+        if dist.get_rank() == 0:
+            torch.save(actor.lr_scheduler.state_dict(), lr_scheduler_dir / LR_SCHEDULER_FILE)
 
     if dist.get_rank() == 0:
         rng_state = {"torch": torch.get_rng_state()}
