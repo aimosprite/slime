@@ -8,6 +8,8 @@ Environment:
   SLIME_SCRIPT_DATA_JSONL: path to train_data_filtered.jsonl (required)
   SLIME_SCRIPT_NUM_GPUS: default 16
   SLIME_SCRIPT_TRAIN_BACKEND: megatron | fsdp (default: megatron for GPT-OSS MoE)
+  SLIME_SCRIPT_GLOBAL_BATCH_SIZE: non-smoke only; default 32 (set to e.g. rollout_batch_size * n_samples_per_prompt on few GPUs)
+  SLIME_SCRIPT_ROLLOUT_MAX_RESPONSE_LEN / SLIME_SCRIPT_ROLLOUT_MAX_CONTEXT_LEN: non-smoke rollout limits (defaults 8192 / 65536)
   WANDB_API_KEY: optional; prompted if training with wandb and missing
 
 Example:
@@ -218,9 +220,9 @@ def main() -> None:
             f"--num-steps-per-rollout {num_steps_per_rollout} "
         )
     else:
-        rollout_max_resp = "8192"
-        rollout_max_ctx = "65536"
-        gbs = 32
+        rollout_max_resp = os.environ.get("SLIME_SCRIPT_ROLLOUT_MAX_RESPONSE_LEN", "8192")
+        rollout_max_ctx = os.environ.get("SLIME_SCRIPT_ROLLOUT_MAX_CONTEXT_LEN", "65536")
+        gbs = int(os.environ.get("SLIME_SCRIPT_GLOBAL_BATCH_SIZE", "32"))
         smoke_extra = ""
 
     rollout_args = (

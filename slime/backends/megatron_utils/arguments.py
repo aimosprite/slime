@@ -78,10 +78,15 @@ def _set_default_megatron_args(args):
     if args.vocab_size and not args.padded_vocab_size:
         args.padded_vocab_size = _vocab_size_with_padding(args.vocab_size, args)
 
+    # Model specs often pass --tokenizer-type HuggingFaceTokenizer without --tokenizer-model; still
+    # default the tokenizer path from the HF checkpoint in that case.
     if not args.tokenizer_model and not args.tokenizer_type:
         logger.info("--tokenizer-model not set, use --hf-checkpoint as tokenizer model.")
         args.tokenizer_model = args.hf_checkpoint
         args.tokenizer_type = "HuggingFaceTokenizer"
+    elif not args.tokenizer_model and args.hf_checkpoint:
+        logger.info("--tokenizer-model not set, use --hf-checkpoint as tokenizer model.")
+        args.tokenizer_model = args.hf_checkpoint
     return args
 
 
