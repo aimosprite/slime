@@ -105,6 +105,10 @@ class FSDPTrainRayActor(TrainRayActor):
                 torch_dtype=_fsdp_model_dtype(self.args),
             )
 
+        # Training should not keep generation KV cache to reduce memory footprint.
+        if hasattr(model, "config") and hasattr(model.config, "use_cache"):
+            model.config.use_cache = False
+
         model.train()
 
         full_state = model.state_dict()

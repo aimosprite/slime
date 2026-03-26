@@ -211,6 +211,43 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 action="store_true",
                 default=False,
             )
+            parser.add_argument(
+                "--enable-lora",
+                action="store_true",
+                default=False,
+                help="Enable native Megatron-Bridge LoRA adapters for training.",
+            )
+            parser.add_argument(
+                "--lora-r",
+                type=int,
+                default=8,
+                help="LoRA rank (adapter dimension).",
+            )
+            parser.add_argument(
+                "--lora-alpha",
+                type=int,
+                default=32,
+                help="LoRA alpha scaling factor.",
+            )
+            parser.add_argument(
+                "--lora-dropout",
+                type=float,
+                default=0.0,
+                help="LoRA dropout probability.",
+            )
+            parser.add_argument(
+                "--lora-lr",
+                type=float,
+                default=2e-4,
+                help="Learning rate to use when LoRA is enabled.",
+            )
+            parser.add_argument(
+                "--lora-target-policy",
+                type=str,
+                choices=["mlp_moe_only"],
+                default="mlp_moe_only",
+                help="LoRA target selection policy.",
+            )
 
             return parser
 
@@ -1800,3 +1837,22 @@ def slime_validate_args(args):
 
     if args.only_train_params_name_list and args.freeze_params_name_list:
         raise ValueError("You can only specify ONE of: --only-train-params-name-list, or --freeze-params-name-list.")
+
+    if args.enable_lora:
+        if args.train_backend != "megatron":
+            raise ValueError("--enable-lora currently supports only --train-backend megatron.")
+        if args.megatron_to_hf_mode != "bridge":
+            raise ValueError("--enable-lora requires --megatron-to-hf-mode bridge.")
+        if args.lora_r <= 0:
+            raise ValueError("--lora-r must be positive.")
+        if args.lora_alpha <= 0:
+            raise ValueError("--lora-alpha must be positive.")
+        if not (0.0 <= args.lora_dropout < 1.0):
+            raise ValueError("--lora-dropout must be in [0.0, 1.0).")
+        if args.lora_lr <= 0:
+            raise ValueError("--lora-lr must be positive.")
+
+        # Memory-first LoRA training defaults should supersede generic RL defaults.
+        if args.lr != args.lora_lr:
+            logger.info("LoRA is enabled; overriding --lr with --lora-lr for adapter training.")
+            args.lr = args.lora_lr

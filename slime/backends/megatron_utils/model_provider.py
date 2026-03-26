@@ -1,6 +1,7 @@
 # Adapt from https://github.com/NVIDIA/Megatron-LM/blob/b1efb3c7126ef7615e8c333432d76e08038e17ff/pretrain_gpt.py
 import argparse
 import inspect
+import logging
 import re
 from contextlib import nullcontext
 from typing import Literal
@@ -18,6 +19,8 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.training.arguments import core_transformer_config_from_args
 
 from slime.utils.misc import load_function
+
+logger = logging.getLogger(__name__)
 
 
 # Adapt from https://github.com/volcengine/verl/blob/c3b20575d2bc815fcccd84bddb4c0401fc4b632b/verl/models/llama/megatron/layers/parallel_linear.py#L82
@@ -216,6 +219,7 @@ def wrap_model_provider_with_freeze(original_provider, args):
         else:
             model = original_provider(pre_process=pre_process, post_process=post_process)
 
+        model = apply_lora_if_enabled(model, args)
         freeze_model_params(model, args)
 
         return model
@@ -238,3 +242,85 @@ def freeze_model_params(model: GPTModel, args: argparse.Namespace):
                 if re.search(pattern, name):
                     param.requires_grad = False
                     break
+
+
+def apply_lora_if_enabled(model: GPTModel, args: argparse.Namespace) -> GPTModel:
+    if not getattr(args, "enable_lora", False):
+        return model
+
+    if getattr(args, "lora_target_policy", "mlp_moe_only") != "mlp_moe_only":
+        raise ValueError(f"Unsupported lora_target_policy={args.lora_target_policy}")
+
+    from megatron.bridge.peft.lora import LoRA
+
+    target_modules, summary = discover_lora_target_modules(model)
+
+    lora_dtype = None
+    if getattr(args, "bf16", False):
+        lora_dtype = torch.bfloat16
+    elif getattr(args, "fp16", False):
+        lora_dtype = torch.float16
+
+    lora = LoRA(
+        target_modules=target_modules,
+        dim=args.lora_r,
+        alpha=args.lora_alpha,
+        dropout=args.lora_dropout,
+        lora_dtype=lora_dtype,
+    )
+    model = lora(model, training=True)
+
+    logger.info(
+        "Applied bridge LoRA: %d target patterns, %d mlp linear modules (%d expert fc1, %d expert fc2).",
+        len(target_modules),
+        summary["mlp_linear_count"],
+        summary["expert_fc1_count"],
+        summary["expert_fc2_count"],
+    )
+    logger.info("Sample LoRA target patterns: %s", ", ".join(target_modules[:8]))
+    return model
+
+
+def discover_lora_target_modules(model: GPTModel) -> tuple[list[str], dict[str, int]]:
+    mlp_linear_full_names: list[str] = []
+    expert_fc1_count = 0
+    expert_fc2_count = 0
+
+    for full_name, module in model.named_modules():
+        if not full_name or ".mlp." not in full_name:
+            continue
+        if not _is_linear_like_module(module):
+            continue
+
+        mlp_linear_full_names.append(full_name)
+        if ".experts." in full_name and full_name.endswith("linear_fc1"):
+            expert_fc1_count += 1
+        if ".experts." in full_name and full_name.endswith("linear_fc2"):
+            expert_fc2_count += 1
+
+    if not mlp_linear_full_names:
+        raise RuntimeError("No MLP linear modules discovered for LoRA targeting.")
+    if expert_fc1_count == 0 or expert_fc2_count == 0:
+        raise RuntimeError(
+            "LoRA target discovery failed to find MoE expert projections "
+            "(expected expert linear_fc1 and linear_fc2 modules)."
+        )
+
+    # Build robust wildcard patterns from discovered module names, replacing numeric
+    # indices with '*' so the same policy remains stable across model sizes.
+    patterns = sorted({_generalize_module_name(name) for name in mlp_linear_full_names})
+    summary = {
+        "mlp_linear_count": len(mlp_linear_full_names),
+        "expert_fc1_count": expert_fc1_count,
+        "expert_fc2_count": expert_fc2_count,
+    }
+    return patterns, summary
+
+
+def _is_linear_like_module(module: torch.nn.Module) -> bool:
+    name = module.__class__.__name__.lower()
+    return "linear" in name
+
+
+def _generalize_module_name(full_name: str) -> str:
+    return ".".join("*" if part.isdigit() else part for part in full_name.split("."))

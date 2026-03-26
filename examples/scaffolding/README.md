@@ -32,6 +32,24 @@ python examples/scaffolding/run_gpt_oss_scaffolding_rl.py
 
 Tune GPUs and parallelism via `SLIME_SCRIPT_NUM_GPUS`, `SLIME_SCRIPT_TP`, `SLIME_SCRIPT_EP`, `SLIME_SCRIPT_ROLLOUT_TP`, etc.
 
+### Modal single-script launcher
+
+Use `examples/scaffolding/run_gpt_oss_scaffolding_modal.py` to launch the same RL entrypoint on Modal with model-size defaults:
+
+- `20b`: `2xH200`, `TP=2`, `EP=1`, `rollout_tp=2`
+- `120b`: `8xH200`, `TP=1`, `EP=8`, `rollout_tp=8`
+
+```bash
+# Optional Modal infra wiring:
+# export SLIME_MODAL_VOLUME=slime-data
+# export SLIME_MODAL_SECRET=slime-training-secrets
+
+modal run examples/scaffolding/run_gpt_oss_scaffolding_modal.py \
+  --model-size 20b \
+  --hf-checkpoint /root/data/models/gpt-oss-20b \
+  --data-jsonl /root/data/train_data_filtered.jsonl
+```
+
 ### Smoke test (20B, few prompts)
 
 Runs reward checks + config consistency (`n_samples_per_prompt` = `2 * SLIME_SCAFFOLDING_ATTEMPTS`), then **`--debug-rollout-only`** with one rollout step and batch size 1 (override via env).

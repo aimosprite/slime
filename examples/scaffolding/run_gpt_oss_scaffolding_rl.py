@@ -244,9 +244,19 @@ def main() -> None:
         "--eps-clip-high 0.28 "
     )
 
+    lora_lr = os.environ.get("SLIME_SCRIPT_LORA_LR", "2e-4")
+    lora_args = (
+        "--enable-lora "
+        "--lora-r 8 "
+        "--lora-alpha 32 "
+        "--lora-dropout 0.0 "
+        f"--lora-lr {lora_lr} "
+        "--lora-target-policy mlp_moe_only "
+    )
+
     optim_args = (
         "--optimizer adam "
-        "--lr 1e-6 "
+        f"--lr {lora_lr} "
         "--lr-decay-style constant "
         "--weight-decay 0.1 "
         "--adam-beta1 0.9 "
@@ -277,6 +287,7 @@ def main() -> None:
             f"{ckpt_args} "
             f"{rollout_args} "
             f"{optim_args} "
+            f"{lora_args} "
             f"{grpo_args} "
             f"{sglang_args} "
             f"{wandb_args} "
