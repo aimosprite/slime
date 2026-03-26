@@ -1,6 +1,9 @@
 """
-Custom rollout: parallel solve attempts + unconditional gen-select judge round.
+Custom rollout: parallel solve attempts + parallel gen-select judges.
 Trains only on model-generated tokens (loss_mask); tool / observation tokens masked 0.
+
+Each problem yields ``2 * attempts`` samples (default 8 solvers + 8 judges). GRPO normalization is
+split across solver and judge groups via ``--custom-reward-post-process-path``.
 """
 
 from __future__ import annotations
@@ -10,7 +13,6 @@ import copy
 import logging
 import re
 import time
-from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -19,19 +21,26 @@ from tqdm import tqdm
 
 from examples.scaffolding.gs_config import GEN_SELECT_PROMPT, SYSTEM_PROMPT, ScaffoldingCFG
 from examples.scaffolding.python_tool import PersistentPythonSession
-from examples.scaffolding.reward_gpt_oss_scaffolding import scalar_correctness_reward
+from examples.scaffolding.reward_gpt_oss_scaffolding import (
+    judge_selection_reward,
+    scalar_correctness_reward,
+)
+from examples.scaffolding.scaffolding_boxed import (
+    boxed_answer_valid_for_stop,
+    extract_last_boxed_integer,
+    normalize_int_answer,
+)
 from slime.rollout.base_types import RolloutFnEvalOutput, RolloutFnTrainOutput
 from slime.rollout.filter_hub.base_types import MetricGatherer, call_dynamic_filter
-from slime.utils.misc import load_function
 from slime.rollout.sglang_rollout import GenerateState, abort
 from slime.utils.async_utils import run
 from slime.utils.http_utils import post
+from slime.utils.misc import load_function
 from slime.utils.types import Sample
 
 logger = logging.getLogger(__name__)
 
 CODE_BLOCK_RE = re.compile(r"```python\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
-BOXED_INT_RE = re.compile(r"\\boxed\{(-?\d+)\}")
 TOOL_OBSERVATION_TEMPLATE = "<|im_end|>\n<|im_start|>tool\n{content}\n<|im_end|>\n<|im_start|>assistant\n"
 NOTEBOOK_START_TIME = time.time()
 
@@ -63,14 +72,54 @@ def _format_solutions_for_judge(attempts: list[AttemptResult]) -> str:
         if att.extracted_answer is not None:
             ans = str(att.extracted_answer)
         else:
-            m = BOXED_INT_RE.findall(att.response_text)
-            ans = m[-1] if m else "(no answer)"
+            ext = extract_last_boxed_integer(att.response_text)
+            ans = ext if ext is not None else "(no answer)"
         parts.append(f"--- Solution {i} (final answer: {ans}) ---\n{text}")
     return "\n\n".join(parts)
 
 
-def _encode_prompt_ids(tokenizer: Any, problem_text: str) -> list[int]:
-    return tokenizer.encode(problem_text, add_special_tokens=False)
+def _encode_solver_prompt_ids(tokenizer: Any, problem_text: str) -> list[int]:
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": problem_text},
+    ]
+    try:
+        return tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+        )
+    except Exception:
+        return tokenizer.encode(
+            f"<|im_start|>system\n{SYSTEM_PROMPT}<|im_end|>\n"
+            f"<|im_start|>user\n{problem_text}<|im_end|>\n"
+            f"<|im_start|>assistant\n",
+            add_special_tokens=False,
+        )
+
+
+def _encode_judge_prompt_ids(tokenizer: Any, problem_text: str, attempt_results: list[AttemptResult]) -> list[int]:
+    """Match gen-select-nb.ipynb: full GEN_SELECT_PROMPT as a single user message (no extra system turn)."""
+    sols = _format_solutions_for_judge(attempt_results)
+    n = len(attempt_results)
+    user_prompt = GEN_SELECT_PROMPT.format(
+        num_solutions=n,
+        max_idx=n - 1,
+        problem=problem_text,
+        solutions=sols,
+    )
+    messages = [{"role": "user", "content": user_prompt}]
+    try:
+        return tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+        )
+    except Exception:
+        return tokenizer.encode(
+            f"<|im_start|>user\n{user_prompt}<|im_end|>\n<|im_start|>assistant\n",
+            add_special_tokens=False,
+        )
 
 
 async def _sglang_generate(
@@ -100,7 +149,7 @@ async def run_one_attempt(
     session_id: str | None,
 ) -> AttemptResult:
     tokenizer = state.tokenizer
-    prompt_ids = _encode_prompt_ids(tokenizer, problem_text)
+    prompt_ids = _encode_solver_prompt_ids(tokenizer, problem_text)
 
     response_token_ids: list[int] = []
     loss_mask: list[int] = []
@@ -152,15 +201,9 @@ async def run_one_attempt(
             loss_mask.extend([1] * len(new_ids))
             rollout_log_probs.extend(new_lps)
 
-            m = BOXED_INT_RE.findall(response_text)
-            if m:
-                try:
-                    v = int(m[-1])
-                    if 0 <= v <= 99999:
-                        status = Sample.Status.COMPLETED
-                        break
-                except ValueError:
-                    pass
+            if boxed_answer_valid_for_stop(response_text):
+                status = Sample.Status.COMPLETED
+                break
 
             match = CODE_BLOCK_RE.search(chunk_text)
             if match and time.time() < deadline:
@@ -186,8 +229,7 @@ async def run_one_attempt(
     if status == Sample.Status.PENDING:
         status = Sample.Status.COMPLETED if response_token_ids else Sample.Status.TRUNCATED
 
-    m = BOXED_INT_RE.findall(response_text)
-    extracted = m[-1] if m else None
+    extracted = extract_last_boxed_integer(response_text)
 
     return AttemptResult(
         prompt_ids=prompt_ids,
@@ -201,33 +243,6 @@ async def run_one_attempt(
     )
 
 
-def _encode_judge_prompt_ids(tokenizer: Any, problem_text: str, attempt_results: list[AttemptResult]) -> list[int]:
-    sols = _format_solutions_for_judge(attempt_results)
-    n = len(attempt_results)
-    user_prompt = GEN_SELECT_PROMPT.format(
-        num_solutions=n,
-        max_idx=n - 1,
-        problem=problem_text,
-        solutions=sols,
-    )
-    messages = [
-        {"role": "system", "content": "You are a careful judge for math competitions."},
-        {"role": "user", "content": user_prompt},
-    ]
-    try:
-        return tokenizer.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=True,
-        )
-    except Exception:
-        return tokenizer.encode(
-            f"<|im_start|>system\nYou are a careful judge for math competitions.<|im_end|>\n"
-            f"<|im_start|>user\n{user_prompt}<|im_end|>\n<|im_start|>assistant\n",
-            add_special_tokens=False,
-        )
-
-
 async def run_judge_round(
     args: Any,
     state: GenerateState,
@@ -237,6 +252,7 @@ async def run_judge_round(
     deadline: float,
     sampling_params: dict[str, Any],
     session_id: str | None,
+    judge_idx: int,
 ) -> AttemptResult:
     tokenizer = state.tokenizer
     prompt_ids = _encode_judge_prompt_ids(tokenizer, problem_text, attempt_results)
@@ -249,11 +265,11 @@ async def run_judge_round(
 
     headers = None
     if getattr(args, "sglang_router_policy", None) == "consistent_hashing" and session_id:
-        headers = {"X-SMG-Routing-Key": f"{session_id}-judge"}
+        headers = {"X-SMG-Routing-Key": f"{session_id}-judge{judge_idx}"}
 
     sp = sampling_params.copy()
     sp["temperature"] = cfg.judge_temperature
-    sp["max_new_tokens"] = min(cfg.judge_max_tokens, 8192)
+    sp["max_new_tokens"] = cfg.judge_max_tokens
 
     max_ctx = getattr(args, "rollout_max_context_len", None) or 65536
     while time.time() < deadline:
@@ -293,8 +309,7 @@ async def run_judge_round(
     if status == Sample.Status.PENDING:
         status = Sample.Status.COMPLETED if response_token_ids else Sample.Status.TRUNCATED
 
-    m = BOXED_INT_RE.findall(response_text)
-    extracted = m[-1] if m else None
+    extracted = extract_last_boxed_integer(response_text)
 
     return AttemptResult(
         prompt_ids=prompt_ids,
@@ -304,11 +319,52 @@ async def run_judge_round(
         rollout_log_probs=rollout_log_probs,
         extracted_answer=extracted,
         status=status,
-        metadata={"round": "judge"},
+        metadata={"round": "judge", "judge_idx": judge_idx},
     )
 
 
-def _attempt_to_sample(template: Sample, att: AttemptResult, *, round_number: int) -> Sample:
+def _solver_proposal_set(attempts: list[AttemptResult]) -> set[str]:
+    proposed: set[str] = set()
+    for a in attempts:
+        x = extract_last_boxed_integer(a.response_text)
+        if x is None:
+            continue
+        try:
+            proposed.add(normalize_int_answer(x))
+        except (ValueError, OverflowError):
+            continue
+    return proposed
+
+
+def _placeholder_attempt(
+    prompt_ids: list[int],
+    attempt_idx: int,
+    *,
+    cancelled: bool = False,
+) -> AttemptResult:
+    meta = {"attempt_idx": attempt_idx, "turns": 0}
+    if cancelled:
+        meta["cancelled"] = True
+    return AttemptResult(
+        prompt_ids=prompt_ids,
+        response_token_ids=[],
+        response_text="",
+        loss_mask=[],
+        rollout_log_probs=[],
+        extracted_answer=None,
+        status=Sample.Status.TRUNCATED,
+        metadata=meta,
+    )
+
+
+def _attempt_to_sample(
+    template: Sample,
+    att: AttemptResult,
+    *,
+    round_type: str,
+    round_number: int,
+    proposed_answers: set[str] | None = None,
+) -> Sample:
     s = copy.deepcopy(template)
     s.tokens = att.prompt_ids + att.response_token_ids
     s.response_length = len(att.response_token_ids)
@@ -318,17 +374,25 @@ def _attempt_to_sample(template: Sample, att: AttemptResult, *, round_number: in
     s.status = att.status
     s.metadata = dict(template.metadata or {})
     s.metadata["round_number"] = round_number
+    s.metadata["round_type"] = round_type
     s.metadata.update(att.metadata)
-    s.reward = scalar_correctness_reward(att.response_text, template.label or "")
+    if round_type == "solver":
+        s.reward = scalar_correctness_reward(att.response_text, template.label or "")
+    else:
+        s.reward = judge_selection_reward(
+            att.response_text,
+            template.label or "",
+            proposed_answers or set(),
+        )
     return s
 
 
 async def process_group(args: Any, group: list[Sample]) -> list[Sample]:
     cfg = ScaffoldingCFG.from_env()
-    expected = cfg.attempts + 1
+    expected = 2 * cfg.attempts
     assert len(group) == expected, (
-        f"Group size {len(group)} must equal attempts+1={expected}. "
-        "Set --n-samples-per-prompt to match SLIME_SCAFFOLDING_ATTEMPTS+1."
+        f"Group size {len(group)} must equal 2 * attempts = {expected}. "
+        "Set --n-samples-per-prompt to 2 * SLIME_SCAFFOLDING_ATTEMPTS."
     )
 
     state = GenerateState(args)
@@ -351,117 +415,104 @@ async def process_group(args: Any, group: list[Sample]) -> list[Sample]:
 
     session_id = getattr(template, "session_id", None) or None
 
-    # Parallel attempts with early-stop
-    attempt_tasks: list[asyncio.Task[Any]] = []
-    for i in range(cfg.attempts):
-        if time.time() >= deadline:
-            break
-        attempt_tasks.append(
-            asyncio.create_task(
-                run_one_attempt(
-                    args,
-                    state,
-                    cfg,
-                    problem_text,
-                    i,
-                    deadline,
-                    sampling_params,
-                    session_id,
+    attempt_tasks = [
+        asyncio.create_task(
+            run_one_attempt(
+                args,
+                state,
+                cfg,
+                problem_text,
+                i,
+                deadline,
+                sampling_params,
+                session_id,
+            )
+        )
+        for i in range(cfg.attempts)
+    ]
+    raw_attempts = await asyncio.gather(*attempt_tasks, return_exceptions=True)
+
+    ref_prompt_ids = _encode_solver_prompt_ids(state.tokenizer, problem_text)
+    attempts: list[AttemptResult] = []
+    for i, res in enumerate(raw_attempts):
+        if isinstance(res, BaseException):
+            logger.exception("Solver attempt %s failed: %s", i, res)
+            attempts.append(_placeholder_attempt(ref_prompt_ids, i, cancelled=True))
+        else:
+            attempts.append(res)
+
+    proposed = _solver_proposal_set(attempts)
+
+    judge_tasks = [
+        asyncio.create_task(
+            run_judge_round(
+                args,
+                state,
+                cfg,
+                problem_text,
+                list(attempts),
+                deadline,
+                sampling_params,
+                session_id,
+                j,
+            )
+        )
+        for j in range(cfg.attempts)
+    ]
+    raw_judges = await asyncio.gather(*judge_tasks, return_exceptions=True)
+
+    judges: list[AttemptResult] = []
+    judge_prompt_ids = _encode_judge_prompt_ids(state.tokenizer, problem_text, list(attempts))
+    for j, res in enumerate(raw_judges):
+        if isinstance(res, BaseException):
+            logger.exception("Judge rollout %s failed: %s", j, res)
+            judges.append(
+                AttemptResult(
+                    prompt_ids=judge_prompt_ids,
+                    response_token_ids=[],
+                    response_text="",
+                    loss_mask=[],
+                    rollout_log_probs=[],
+                    extracted_answer=None,
+                    status=Sample.Status.TRUNCATED,
+                    metadata={"round": "judge", "judge_idx": j, "failed": True},
                 )
             )
-        )
+        else:
+            judges.append(res)
 
-    attempts: list[AttemptResult | None] = [None] * cfg.attempts
-    vote_counts: dict[str, int] = defaultdict(int)
-    early_stop = False
-
-    for fut in asyncio.as_completed(attempt_tasks):
-        try:
-            att = await fut
-        except asyncio.CancelledError:
-            continue
-        idx = att.metadata.get("attempt_idx", 0)
-        if isinstance(idx, int) and 0 <= idx < cfg.attempts:
-            attempts[idx] = att
-        if att.extracted_answer is not None:
-            vote_counts[str(att.extracted_answer)] += 1
-            if vote_counts and max(vote_counts.values()) >= cfg.early_stop:
-                early_stop = True
-        if early_stop:
-            break
-
-    for t in attempt_tasks:
-        if not t.done():
-            t.cancel()
-    await asyncio.gather(*attempt_tasks, return_exceptions=True)
-
-    ref_prompt_ids = _encode_prompt_ids(state.tokenizer, problem_text)
-    for a in attempts:
-        if a is not None and getattr(a, "prompt_ids", None):
-            ref_prompt_ids = a.prompt_ids
-            break
-
-    # Fill missing attempts with truncated placeholders
-    for i in range(cfg.attempts):
-        if attempts[i] is None:
-            attempts[i] = AttemptResult(
-                prompt_ids=ref_prompt_ids,
-                response_token_ids=[],
-                response_text="",
-                loss_mask=[],
-                rollout_log_probs=[],
-                extracted_answer=None,
-                status=Sample.Status.TRUNCATED,
-                metadata={"attempt_idx": i, "cancelled": True},
-            )
-
-    # Always run judge (no majority gate)
-    if time.time() < deadline:
-        judge = await run_judge_round(
-            args,
-            state,
-            cfg,
-            problem_text,
-            list(attempts),
-            deadline,
-            sampling_params,
-            session_id,
-        )
-    else:
-        judge = AttemptResult(
-            prompt_ids=_encode_judge_prompt_ids(state.tokenizer, problem_text, list(attempts)),
-            response_token_ids=[],
-            response_text="",
-            loss_mask=[],
-            rollout_log_probs=[],
-            extracted_answer=None,
-            status=Sample.Status.TRUNCATED,
-            metadata={"round": "judge", "timeout": True},
-        )
+    assert len(judges) == cfg.attempts, f"expected {cfg.attempts} judge results, got {len(judges)}"
 
     out_samples: list[Sample] = []
     for i in range(cfg.attempts):
-        s = _attempt_to_sample(group[i], attempts[i], round_number=1)
+        s = _attempt_to_sample(group[i], attempts[i], round_type="solver", round_number=1)
         s.index = group[i].index
         s.group_index = group[i].group_index
         out_samples.append(s)
 
-    sj = _attempt_to_sample(group[cfg.attempts], judge, round_number=2)
-    sj.index = group[cfg.attempts].index
-    sj.group_index = group[cfg.attempts].group_index
-    out_samples.append(sj)
+    for j in range(cfg.attempts):
+        sj = _attempt_to_sample(
+            group[cfg.attempts + j],
+            judges[j],
+            round_type="judge",
+            round_number=2,
+            proposed_answers=proposed,
+        )
+        sj.index = group[cfg.attempts + j].index
+        sj.group_index = group[cfg.attempts + j].group_index
+        out_samples.append(sj)
 
-    # wandb extras
     try:
         import wandb
 
         if wandb.run is not None:
+            sol_rewards = [s.reward for s in out_samples[: cfg.attempts]]
+            jud_rewards = [s.reward for s in out_samples[cfg.attempts :]]
             wandb.log(
                 {
-                    "scaffolding/early_stop": float(early_stop),
                     "scaffolding/problem_budget_s": budget,
-                    "scaffolding/r1_mean_reward": sum(s.reward for s in out_samples[: cfg.attempts]) / cfg.attempts,
-                    "scaffolding/r2_reward": float(out_samples[-1].reward),
+                    "scaffolding/solver_mean_reward": sum(sol_rewards) / cfg.attempts,
+                    "scaffolding/judge_mean_reward": sum(jud_rewards) / cfg.attempts,
                 }
             )
     except Exception:

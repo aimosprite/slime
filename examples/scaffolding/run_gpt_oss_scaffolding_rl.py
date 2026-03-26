@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """
-Single entry: AIMO filtered JSONL + GPT-OSS (20B or 120B) + scaffolding rollout + GRPO.
+Single entry: AIMO filtered JSONL + GPT-OSS (20B or 120B) + dual-group scaffolding rollout + GRPO.
 
 Environment:
   SLIME_SCRIPT_MODEL_SIZE: "20b" | "120b" (default: 20b)
   SLIME_SCRIPT_HF_CHECKPOINT: path to HF weights (required)
   SLIME_SCRIPT_DATA_JSONL: path to train_data_filtered.jsonl (required)
-  SLIME_SCRIPT_NUM_GPUS: default 16
+  SLIME_SCRIPT_NUM_GPUS: default 16 (sbatch scripts set 2 or 4)
+  SLIME_SCRIPT_TP / SLIME_SCRIPT_EP / SLIME_SCRIPT_ETP: Megatron parallel sizes (defaults 2 / 1 / 1; ETP must stay 1 for GPT-OSS MoE+bias)
+  SLIME_SCRIPT_ROLLOUT_TP: SGLang tensor parallel width (default 2; match TP on small GPU counts)
   SLIME_SCRIPT_TRAIN_BACKEND: megatron | fsdp (default: megatron for GPT-OSS MoE)
   SLIME_SCRIPT_GLOBAL_BATCH_SIZE: non-smoke only; default 32 (set to e.g. rollout_batch_size * n_samples_per_prompt on few GPUs)
   SLIME_SCRIPT_ROLLOUT_MAX_RESPONSE_LEN / SLIME_SCRIPT_ROLLOUT_MAX_CONTEXT_LEN: non-smoke rollout limits (defaults 8192 / 65536)
+  SLIME_SCRIPT_SGLANG_MEM_FRACTION: optional override for --sglang-mem-fraction-static (default 0.75)
+  SLIME_SCRIPT_MAX_TOKENS_PER_GPU: optional override for --max-tokens-per-gpu (default 4096)
   WANDB_API_KEY: optional; prompted if training with wandb and missing
 
 Example:
@@ -29,7 +33,6 @@ Smoke test (20B only, few scaffolding attempts, one rollout step, --debug-rollou
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import os
 import sys
 from pathlib import Path
@@ -80,56 +83,45 @@ def _apply_smoke_env_defaults() -> None:
         "SLIME_SCRIPT_ROLLOUT_TP": "2",
         "SLIME_SCRIPT_TP": "2",
         "SLIME_SCRIPT_EP": "1",
+        "SLIME_SCRIPT_ETP": "1",
     }
     for k, v in defaults.items():
         if not os.environ.get(k):
             os.environ[k] = v
 
 
-def _load_math_dapo_utils():
-    """Load math_dapo_utils without importing `slime.rollout.rm_hub` (avoids aiohttp, etc.)."""
-    path = _REPO_ROOT / "slime/rollout/rm_hub/math_dapo_utils.py"
-    spec = importlib.util.spec_from_file_location("slime_math_dapo_utils_smoke", path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Cannot load {path}")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
 def _smoke_reward_checks() -> None:
-    """Validate boxed correctness rewards match `reward_gpt_oss_scaffolding.scalar_correctness_reward`."""
-    math_dapo = _load_math_dapo_utils()
-
-    def scalar_correctness_reward(response: str, label: str) -> float:
-        out = math_dapo.compute_score(response, label, strict_box_verify=True)
-        return 1.0 if out.get("acc") else 0.0
+    """Validate solver/judge 0/1 rewards and shared boxed extraction."""
+    from examples.scaffolding.reward_gpt_oss_scaffolding import (
+        judge_selection_reward,
+        scalar_correctness_reward,
+    )
 
     assert scalar_correctness_reward("Thus the answer is \\boxed{42}", "42") == 1.0
     assert scalar_correctness_reward("Thus the answer is \\boxed{43}", "42") == 0.0
     assert scalar_correctness_reward("no boxed answer here", "42") == 0.0
-    # Last \\boxed{} wins (strict verify uses tail of response)
     assert scalar_correctness_reward("wrong \\boxed{1} then \\boxed{42}", "42") == 1.0
-    print("[smoke] reward checks OK (strict boxed; matches reward_gpt_oss_scaffolding).")
+    assert judge_selection_reward("\\boxed{42}", "42", {"42"}) == 1.0
+    assert judge_selection_reward("\\boxed{42}", "42", {"43"}) == 0.0
+    assert judge_selection_reward("\\boxed{43}", "42", {"42", "43"}) == 0.0
+    print("[smoke] reward checks OK (solver + judge selection; shared boxed extraction).")
 
 
 def _smoke_config_consistency() -> None:
-    """Ensure launcher n_samples_per_prompt matches gs_config attempts + judge."""
+    """Ensure launcher n_samples_per_prompt matches 2 * solver attempts (solvers + judges)."""
     from examples.scaffolding.gs_config import ScaffoldingCFG
 
     cfg = ScaffoldingCFG.from_env()
     attempts = int(os.environ.get("SLIME_SCAFFOLDING_ATTEMPTS", "8"))
-    n_sp = attempts + 1
+    n_sp = 2 * attempts
     if cfg.attempts != attempts:
         raise AssertionError(
             f"SLIME_SCAFFOLDING_ATTEMPTS={attempts} but ScaffoldingCFG.attempts={cfg.attempts} "
             "(gs_config must read the same env)."
         )
-    if n_sp != attempts + 1:
-        raise AssertionError("internal: n_samples_per_prompt mismatch")
     print(
         f"[smoke] config OK: attempts={attempts}, n_samples_per_prompt={n_sp} "
-        f"(attempts + judge), rollout uses same SLIME_SCAFFOLDING_ATTEMPTS."
+        f"(2 × attempts: solvers + judges)."
     )
 
 
@@ -189,9 +181,9 @@ def main() -> None:
     if backend not in ("megatron", "fsdp"):
         raise ValueError("SLIME_SCRIPT_TRAIN_BACKEND must be megatron or fsdp")
 
-    # attempts (8) + judge (1)
+    # attempts solvers + attempts judges (default 8 + 8 = 16)
     attempts = int(os.environ.get("SLIME_SCAFFOLDING_ATTEMPTS", "8"))
-    n_sp = attempts + 1
+    n_sp = 2 * attempts
 
     megatron_model_type = "gpt-oss-20B" if model_size == "20b" else "gpt-oss-120B"
 
@@ -240,6 +232,7 @@ def main() -> None:
         f"{smoke_extra}"
         "--advantage-estimator grpo "
         "--rollout-function-path examples.scaffolding.rollout_gpt_oss_scaffolding.generate_rollout_gs "
+        "--custom-reward-post-process-path examples.scaffolding.grpo_dual_group_reward_postprocess.dual_group_grpo_reward_postprocess "
     )
 
     grpo_args = (
@@ -260,14 +253,18 @@ def main() -> None:
         "--adam-beta2 0.98 "
     )
 
+    sglang_mem = os.environ.get("SLIME_SCRIPT_SGLANG_MEM_FRACTION", "0.75")
+    max_tok = os.environ.get("SLIME_SCRIPT_MAX_TOKENS_PER_GPU", "4096")
     sglang_args = (
         f"--rollout-num-gpus-per-engine {os.environ.get('SLIME_SCRIPT_ROLLOUT_TP', '2')} "
-        "--sglang-mem-fraction-static 0.75 "
+        f"--sglang-mem-fraction-static {sglang_mem} "
     )
 
-    # 16xH100 default: colocate train+rollout on same GPUs; tune TP/PP via env.
+    # Colocated train+rollout on the same GPUs; tune TP/EP/ETP via env (see sbatch scripts).
     tp = os.environ.get("SLIME_SCRIPT_TP", "2")
     ep = os.environ.get("SLIME_SCRIPT_EP", "1")
+    # MoE + bias: Megatron requires expert tensor parallel size 1 (see e.g. other run-*.sh MoE configs).
+    etp = os.environ.get("SLIME_SCRIPT_ETP", "1")
     misc_args = (
         "--actor-num-nodes 1 "
         f"--actor-num-gpus-per-node {num_gpus} "
@@ -287,6 +284,7 @@ def main() -> None:
             "--megatron-to-hf-mode bridge "
             f"--tensor-model-parallel-size {tp} "
             f"--expert-model-parallel-size {ep} "
+            f"--expert-tensor-parallel-size {etp} "
             "--sequence-parallel "
             "--pipeline-model-parallel-size 1 "
             "--context-parallel-size 1 "
@@ -294,7 +292,7 @@ def main() -> None:
             "--recompute-method uniform "
             "--recompute-num-layers 1 "
             "--use-dynamic-batch-size "
-            "--max-tokens-per-gpu 4096 "
+            f"--max-tokens-per-gpu {max_tok} "
             f"{misc_args} "
         )
         meg_type = megatron_model_type

@@ -6,7 +6,6 @@ Override via environment variables with prefix SLIME_SCAFFOLDING_.
 from __future__ import annotations
 
 import os
-import re
 from dataclasses import dataclass
 
 
@@ -37,8 +36,9 @@ class ScaffoldingCFG:
     attempts: int = 8
     workers: int = 20
     turns: int = 128
-    gen_select_threshold: int = 4  # kept for logging only; judge always runs
-    judge_temperature: float = 0.0
+    gen_select_threshold: int = 4  # notebook parity; unused in slime rollout
+    # Stochastic judges for diverse GRPO groups (override via SLIME_SCAFFOLDING_JUDGE_TEMPERATURE).
+    judge_temperature: float = 1.0
     judge_max_tokens: int = 32768
     buffer_tokens: int = 512
     search_tokens: int = 32
@@ -65,7 +65,7 @@ class ScaffoldingCFG:
             workers=_env_int(f"{p}WORKERS", 20),
             turns=_env_int(f"{p}TURNS", 128),
             gen_select_threshold=_env_int(f"{p}GEN_SELECT_THRESHOLD", 4),
-            judge_temperature=_env_float(f"{p}JUDGE_TEMPERATURE", 0.0),
+            judge_temperature=_env_float(f"{p}JUDGE_TEMPERATURE", 1.0),
             judge_max_tokens=_env_int(f"{p}JUDGE_MAX_TOKENS", 32768),
             buffer_tokens=_env_int(f"{p}BUFFER_TOKENS", 512),
             search_tokens=_env_int(f"{p}SEARCH_TOKENS", 32),
@@ -81,8 +81,7 @@ SYSTEM_PROMPT = (
     "tool when helpful. When you have the final answer, put it in \\boxed{} as an integer."
 )
 
-BOXED_RE = re.compile(r"\\boxed\{(-?\d+)\}")
-
+# Kept in lockstep with examples/scaffolding/gen-select-nb.ipynb (cell defining GEN_SELECT_PROMPT).
 GEN_SELECT_PROMPT = """\
 You are judging {num_solutions} candidate solutions (numbered 0 through {max_idx}) to a math problem.
 
