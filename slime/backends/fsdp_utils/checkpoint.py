@@ -102,7 +102,22 @@ def _materialize_state_value(value: Any) -> Any:
         if hasattr(tensor, "wait"):
             tensor = tensor.wait()
 
-    return tensor.detach().cpu().contiguous()
+    tensor = tensor.detach().cpu().contiguous()
+
+    # huggingface_hub.save_torch_state_dict() rejects tensors that are views into
+    # a larger storage when writing safetensors. Most tensors above already land
+    # in compact storage, but some GPT-OSS weights still arrive as full-storage
+    # views after FSDP materialization. Clone those so checkpoint save cannot die
+    # on the first shared/view-backed parameter.
+    try:
+        storage_bytes = tensor.untyped_storage().nbytes()
+    except AttributeError:
+        storage_bytes = tensor.storage().size() * tensor.element_size()
+    tensor_bytes = tensor.numel() * tensor.element_size()
+    if tensor.storage_offset() != 0 or storage_bytes != tensor_bytes:
+        tensor = tensor.clone()
+
+    return tensor
 
 
 def _collect_full_model_state_dict(model: torch.nn.Module) -> dict[str, Any] | None:
