@@ -1,13 +1,19 @@
 import dataclasses
+import base64
 import ipaddress
+import inspect
+import json
 import logging
 import multiprocessing
 import os
+import pickle
+import secrets
 import time
 from urllib.parse import quote
 
 import requests
 import sglang_router
+import torch
 from packaging.version import parse
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import kill_process_tree
@@ -17,6 +23,14 @@ from slime.ray.ray_actor import RayActor
 from slime.utils.http_utils import get_host_info
 
 logger = logging.getLogger(__name__)
+
+
+def _ensure_shared_multiprocessing_authkey() -> None:
+    authkey_hex = os.environ.get("SLIME_MP_AUTHKEY_HEX", "").strip()
+    if not authkey_hex:
+        authkey_hex = secrets.token_hex(32)
+        os.environ["SLIME_MP_AUTHKEY_HEX"] = authkey_hex
+    multiprocessing.current_process().authkey = bytes.fromhex(authkey_hex)
 
 
 def get_base_gpu_id(args, rank):
@@ -50,12 +64,283 @@ def _to_local_gpu_id(physical_gpu_id: int) -> int:
     )
 
 
+def _patch_sglang_weight_loader_compat() -> None:
+    """Make older SGLang default_weight_loader tolerant of newer keyword args."""
+    try:
+        from sglang.srt.model_loader import weight_utils
+    except Exception:
+        return
+
+    default_weight_loader = getattr(weight_utils, "default_weight_loader", None)
+    if default_weight_loader is None:
+        return
+
+    try:
+        sig = inspect.signature(default_weight_loader)
+    except (TypeError, ValueError):
+        return
+
+    if getattr(default_weight_loader, "_slime_filters_unsupported_kwargs", False):
+        return
+
+    if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in sig.parameters.values()):
+        return
+
+    supported_kwargs = {
+        name
+        for name, param in sig.parameters.items()
+        if param.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    }
+
+    def _wrap_weight_loader(fn):
+        if getattr(fn, "_slime_filters_unsupported_kwargs", False):
+            return fn
+        try:
+            fn_sig = inspect.signature(fn)
+        except (TypeError, ValueError):
+            return fn
+        if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in fn_sig.parameters.values()):
+            return fn
+        fn_supported_kwargs = {
+            name
+            for name, param in fn_sig.parameters.items()
+            if param.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        }
+
+        def _compat_weight_loader(*args, **kwargs):
+            filtered_kwargs = {name: value for name, value in kwargs.items() if name in fn_supported_kwargs}
+            return fn(*args, **filtered_kwargs)
+
+        _compat_weight_loader._slime_filters_unsupported_kwargs = True
+        _compat_weight_loader._slime_original_weight_loader = fn
+        return _compat_weight_loader
+
+    def _compat_default_weight_loader(*args, **kwargs):
+        filtered_kwargs = {name: value for name, value in kwargs.items() if name in supported_kwargs}
+        return default_weight_loader(*args, **filtered_kwargs)
+
+    _compat_default_weight_loader._slime_filters_unsupported_kwargs = True
+    weight_utils.default_weight_loader = _compat_default_weight_loader
+
+    try:
+        from sglang.srt.models import gpt_oss
+
+        if getattr(gpt_oss, "default_weight_loader", None) is default_weight_loader:
+            gpt_oss.default_weight_loader = _compat_default_weight_loader
+    except Exception:
+        pass
+
+    def _patch_live_model_weight_loaders(model) -> int:
+        patched = 0
+        visited = set()
+
+        def _maybe_patch_holder(holder):
+            nonlocal patched
+            loader = getattr(holder, "weight_loader", None)
+            if loader is None:
+                return
+            wrapped = _wrap_weight_loader(loader)
+            if wrapped is not loader:
+                try:
+                    setattr(holder, "weight_loader", wrapped)
+                    patched += 1
+                except Exception:
+                    pass
+
+        for _name, param in model.named_parameters(recurse=True):
+            if id(param) in visited:
+                continue
+            visited.add(id(param))
+            _maybe_patch_holder(param)
+        for _name, module in model.named_modules():
+            if id(module) in visited:
+                continue
+            visited.add(id(module))
+            _maybe_patch_holder(module)
+        return patched
+
+    try:
+        from sglang.srt.model_executor import model_runner as sglang_model_runner
+        from sglang.srt.model_loader.loader import device_loading_context
+        from sglang.srt.model_loader.utils import post_load_weights
+
+        for method_name in ("update_weights_from_disk", "update_weights_from_tensor"):
+            original = getattr(sglang_model_runner.ModelRunner, method_name, None)
+            if original is None or getattr(original, "_slime_live_weight_loader_compat", False):
+                continue
+
+            def _make_wrapper(fn, fn_name):
+                def _wrapped(self, *args, **kwargs):
+                    patched = _patch_live_model_weight_loaders(self.model)
+                    if patched:
+                        logger.info("Patched %s live model weight_loader callables before %s.", patched, fn_name)
+                    result = fn(self, *args, **kwargs)
+                    if fn_name == "update_weights_from_tensor":
+                        try:
+                            success = bool(result[0]) if isinstance(result, tuple) else bool(result)
+                        except Exception:
+                            success = False
+                        if success:
+                            target_device = torch.device(self.device)
+                            processed = 0
+                            for _, module in self.model.named_modules():
+                                quant_method = getattr(module, "quant_method", None)
+                                if quant_method is None:
+                                    continue
+                                with device_loading_context(module, target_device):
+                                    quant_method.process_weights_after_loading(module)
+                                processed += 1
+                            try:
+                                post_load_weights(self.model, self.model_config)
+                            except Exception:
+                                pass
+                            logger.info(
+                                "Reprocessed %s quantized modules after %s.",
+                                processed,
+                                fn_name,
+                            )
+                    return result
+
+                _wrapped._slime_live_weight_loader_compat = True
+                return _wrapped
+
+            setattr(sglang_model_runner.ModelRunner, method_name, _make_wrapper(original, method_name))
+    except Exception:
+        pass
+
+    logger.info("Patched SGLang default_weight_loader to ignore unsupported keyword args.")
+
+
+def _patch_sglang_multiprocessing_serializer_compat() -> None:
+    try:
+        import torch
+        from sglang.srt import utils as sglang_utils
+        from sglang.srt.managers import scheduler_update_weights_mixin as sglang_scheduler_update_weights_mixin
+        from sglang.srt.utils import common as sglang_common
+        from sglang.srt.managers import tp_worker as sglang_tp_worker
+    except Exception:
+        return
+
+    serializer_cls = getattr(sglang_utils, "MultiprocessingSerializer", None)
+    if serializer_cls is None:
+        return
+
+    deserialize = getattr(serializer_cls, "deserialize", None)
+    if deserialize is None or getattr(deserialize, "_slime_by_value_compat", False):
+        return
+
+    def _deserialize_with_by_value_compat(data):
+        if isinstance(data, str):
+            try:
+                payload = json.loads(data)
+            except Exception:
+                payload = None
+            if isinstance(payload, dict) and payload.get("format") == "slime-by-value-flattened-bucket-v1":
+                raw = base64.b64decode(payload["tensor_bytes_b64"])
+                metadata = pickle.loads(base64.b64decode(payload["metadata_pickle_b64"]))
+                flat = torch.frombuffer(bytearray(raw), dtype=torch.uint8).clone()
+                return {
+                    "flattened_tensor": flat,
+                    "metadata": metadata,
+                }
+        return deserialize(data)
+
+    _deserialize_with_by_value_compat._slime_by_value_compat = True
+    serializer_cls.deserialize = staticmethod(_deserialize_with_by_value_compat)
+    common_serializer_cls = getattr(sglang_common, "MultiprocessingSerializer", None)
+    if common_serializer_cls is not None:
+        common_serializer_cls.deserialize = staticmethod(_deserialize_with_by_value_compat)
+    tp_worker_serializer_cls = getattr(sglang_tp_worker, "MultiprocessingSerializer", None)
+    if tp_worker_serializer_cls is not None:
+        tp_worker_serializer_cls.deserialize = staticmethod(_deserialize_with_by_value_compat)
+    logger.info("Patched SGLang MultiprocessingSerializer.deserialize with by-value flattened-bucket support.")
+
+    update_weights_from_tensor = getattr(sglang_tp_worker.TpModelWorker, "update_weights_from_tensor", None)
+    if update_weights_from_tensor is not None and not getattr(
+        update_weights_from_tensor, "_slime_by_value_compat", False
+    ):
+
+        def _tp_worker_update_weights_from_tensor(self, recv_req):
+            raw_payload = recv_req.serialized_named_tensors[self.tp_rank]
+            if recv_req.load_format == "flattened_bucket_by_value" and isinstance(raw_payload, str):
+                try:
+                    payload = json.loads(raw_payload)
+                except Exception:
+                    payload = None
+                if isinstance(payload, dict) and payload.get("format") == "slime-by-value-flattened-bucket-v1":
+                    print("[slime-by-value] tp_worker detected by-value flattened bucket", flush=True)
+                    raw = base64.b64decode(payload["tensor_bytes_b64"])
+                    metadata = pickle.loads(base64.b64decode(payload["metadata_pickle_b64"]))
+                    named_tensors = {
+                        "flattened_tensor": torch.frombuffer(bytearray(raw), dtype=torch.uint8).clone(),
+                        "metadata": metadata,
+                    }
+                    print(
+                        "[slime-by-value] tp_worker reconstructed flattened bucket "
+                        f"bytes={len(raw)} metadata_len={len(metadata)}",
+                        flush=True,
+                    )
+                    return self.model_runner.update_weights_from_tensor(
+                        named_tensors=named_tensors,
+                        load_format="flattened_bucket",
+                    )
+            print(
+                f"[slime-by-value] tp_worker falling back to original serializer path load_format={recv_req.load_format}",
+                flush=True,
+            )
+            return update_weights_from_tensor(self, recv_req)
+
+        _tp_worker_update_weights_from_tensor._slime_by_value_compat = True
+        sglang_tp_worker.TpModelWorker.update_weights_from_tensor = _tp_worker_update_weights_from_tensor
+        logger.info("Patched SGLang TpModelWorker.update_weights_from_tensor with by-value flattened-bucket support.")
+
+    scheduler_update_weights_from_tensor = getattr(
+        sglang_scheduler_update_weights_mixin.SchedulerUpdateWeightsMixin,
+        "update_weights_from_tensor",
+        None,
+    )
+    if scheduler_update_weights_from_tensor is not None and not getattr(
+        scheduler_update_weights_from_tensor, "_slime_by_value_compat", False
+    ):
+
+        # Preserve the original return type behavior without importing the pydantic req output type here.
+        def _scheduler_wrapper(self, recv_req):
+            raw_payload = recv_req.serialized_named_tensors[0]
+            if recv_req.load_format == "flattened_bucket_by_value" and isinstance(raw_payload, str):
+                try:
+                    payload = json.loads(raw_payload)
+                except Exception:
+                    payload = None
+                if isinstance(payload, dict) and payload.get("format") == "slime-by-value-flattened-bucket-v1":
+                    print("[slime-by-value] scheduler detected by-value flattened bucket", flush=True)
+                    worker = self.draft_worker or self.tp_worker
+                    success, message = worker.update_weights_from_tensor(recv_req)
+                    if success:
+                        if recv_req.flush_cache:
+                            self.flush_cache()
+                        if recv_req.weight_version is not None:
+                            self.weight_version = recv_req.weight_version
+                    from sglang.srt.managers.io_struct import UpdateWeightsFromTensorReqOutput
+
+                    return UpdateWeightsFromTensorReqOutput(success, message)
+            return scheduler_update_weights_from_tensor(self, recv_req)
+
+        _scheduler_wrapper._slime_by_value_compat = True
+        sglang_scheduler_update_weights_mixin.SchedulerUpdateWeightsMixin.update_weights_from_tensor = (
+            _scheduler_wrapper
+        )
+        logger.info(
+            "Patched SGLang SchedulerUpdateWeightsMixin.update_weights_from_tensor with by-value support."
+        )
+
+
 def launch_server_process(server_args: ServerArgs) -> multiprocessing.Process:
     from sglang.srt.entrypoints.http_server import launch_server
 
+    _ensure_shared_multiprocessing_authkey()
     multiprocessing.set_start_method("spawn", force=True)
     server_args.host = server_args.host.strip("[]")
-    p = multiprocessing.Process(target=launch_server, args=(server_args,))
+    p = multiprocessing.Process(target=_launch_server_with_patches, args=(server_args,))
     p.start()
 
     if server_args.node_rank != 0:
@@ -70,16 +355,31 @@ def launch_server_process(server_args: ServerArgs) -> multiprocessing.Process:
     return p
 
 
+def _launch_server_with_patches(server_args: ServerArgs) -> None:
+    _ensure_shared_multiprocessing_authkey()
+    _patch_sglang_weight_loader_compat()
+    _patch_sglang_multiprocessing_serializer_compat()
+
+    from sglang.srt.entrypoints.http_server import launch_server
+
+    launch_server(server_args)
+
+
 def _wait_server_healthy(base_url, api_key, is_process_alive):
-    headers = {
-        "Content-Type": "application/json; charset=utf-8",
-        "Authorization": f"Bearer {api_key}",
-    }
+    headers = {"Content-Type": "application/json; charset=utf-8"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    health_mode = os.environ.get("SLIME_SGLANG_HEALTH_MODE", "generate").strip().lower()
+    if health_mode == "basic":
+        health_path = "/v1/models"
+    else:
+        health_path = "/health_generate"
 
     with requests.Session() as session:
         while True:
             try:
-                response = session.get(f"{base_url}/health_generate", headers=headers)
+                response = session.get(f"{base_url}{health_path}", headers=headers)
                 if response.status_code == 200:
                     break
             except requests.RequestException:
@@ -89,6 +389,9 @@ def _wait_server_healthy(base_url, api_key, is_process_alive):
                 raise Exception("Server process terminated unexpectedly.")
 
             time.sleep(2)
+
+        if os.environ.get("SLIME_SGLANG_SKIP_FLUSH_CACHE", "").strip().lower() in {"1", "true", "yes"}:
+            return
 
         # use flush_cache to make sure the working queue is empty, so that we can do offload
         while True:

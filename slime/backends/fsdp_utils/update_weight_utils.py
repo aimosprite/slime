@@ -1,5 +1,9 @@
 import abc
+import base64
+import json
 import logging
+import os
+import pickle
 import socket
 from argparse import Namespace
 from collections.abc import Sequence
@@ -27,6 +31,25 @@ except ImportError:
 
 
 logger = logging.getLogger(__name__)
+
+
+def _serialize_flattened_tensor_data(flattened_tensor_data) -> str:
+    if os.environ.get("SLIME_SGLANG_SERIALIZE_BY_VALUE", "").strip().lower() in {"1", "true", "yes"}:
+        flat = flattened_tensor_data["flattened_tensor"].detach().cpu().contiguous().view(torch.uint8)
+        payload = {
+            "format": "slime-by-value-flattened-bucket-v1",
+            "tensor_bytes_b64": base64.b64encode(flat.numpy().tobytes()).decode("ascii"),
+            "metadata_pickle_b64": base64.b64encode(
+                pickle.dumps(flattened_tensor_data["metadata"], protocol=pickle.HIGHEST_PROTOCOL)
+            ).decode("ascii"),
+        }
+        return json.dumps(payload, separators=(",", ":"))
+
+    return MultiprocessingSerializer.serialize(flattened_tensor_data, output_str=True)
+
+
+def _by_value_enabled() -> bool:
+    return os.environ.get("SLIME_SGLANG_SERIALIZE_BY_VALUE", "").strip().lower() in {"1", "true", "yes"}
 
 
 class UpdateWeight(abc.ABC):
@@ -137,7 +160,7 @@ class UpdateWeightFromTensor(UpdateWeight):
                 "flattened_tensor": flattened_tensor_bucket.get_flattened_tensor(),
                 "metadata": metadata,
             }
-            serialized_tensors.append(MultiprocessingSerializer.serialize(flattened_tensor_data, output_str=True))
+            serialized_tensors.append(_serialize_flattened_tensor_data(flattened_tensor_data))
 
         if self._ipc_gather_src == dist.get_rank():
             # On rank 0, prepare a list to hold the gathered batches from all ranks.
@@ -162,7 +185,7 @@ class UpdateWeightFromTensor(UpdateWeight):
             for i in range(num_dtypes):
                 kwargs = {
                     "serialized_named_tensors": [tensors[i] for tensors in gathered_serialized_batches],
-                    "load_format": "flattened_bucket",
+                    "load_format": "flattened_bucket_by_value" if _by_value_enabled() else "flattened_bucket",
                     "flush_cache": False,
                     "weight_version": str(weight_version),
                 }

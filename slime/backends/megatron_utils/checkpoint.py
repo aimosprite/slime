@@ -1,6 +1,9 @@
+import json
 import logging
 import os
 import re
+import threading
+import time
 from pathlib import Path
 
 # TODO: may need to copy those 2 functions and do refactoring.
@@ -99,11 +102,7 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, checkpointing_con
     args = get_args()
     load_path = args.load
 
-    assert Path(load_path).exists() and _is_dir_nonempty(
-        load_path
-    ), f"{args.load=} does not exist or is an empty directory. Did you specify the wrong folder?"
-
-    if _is_megatron_checkpoint(load_path):
+    if _is_existing_nonempty_dir(load_path) and _is_megatron_checkpoint(load_path):
         return _load_checkpoint_megatron(
             ddp_model=ddp_model,
             optimizer=optimizer,
@@ -111,13 +110,30 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, checkpointing_con
             checkpointing_context=checkpointing_context,
             skip_load_to_model_and_opt=skip_load_to_model_and_opt,
         )
-    else:
+
+    if _is_existing_nonempty_dir(load_path):
         return _load_checkpoint_hf(
             ddp_model=ddp_model,
             optimizer=optimizer,
             args=args,
             load_path=load_path,
         )
+
+    if args.megatron_to_hf_mode == "bridge" and args.hf_checkpoint:
+        logger.info(
+            "args.load=%r is not a local non-empty checkpoint directory; "
+            "falling back to hf_checkpoint=%r for bridge initialization",
+            args.load,
+            args.hf_checkpoint,
+        )
+        return _load_checkpoint_hf(
+            ddp_model=ddp_model,
+            optimizer=optimizer,
+            args=args,
+            load_path=args.hf_checkpoint,
+        )
+
+    raise AssertionError(f"{args.load=} does not exist or is an empty directory. Did you specify the wrong folder?")
 
 
 def _is_megatron_checkpoint(path: str | Path) -> bool:
@@ -128,15 +144,23 @@ def _is_megatron_checkpoint(path: str | Path) -> bool:
 
 def _load_checkpoint_hf(ddp_model, optimizer, args, load_path: str):
     assert args.megatron_to_hf_mode == "bridge", "Only bridge mode is supported for loading HF checkpoint"
-    from megatron.bridge import AutoBridge
-
-    import slime_plugins.megatron_bridge  # noqa: F401
 
     logger.info(f"Load checkpoint from HuggingFace model into Megatron (path={load_path})")
 
     with megatron_bridge_utils.patch_megatron_model(ddp_model):
-        bridge = AutoBridge.from_hf_pretrained(args.hf_checkpoint, trust_remote_code=True)
-        bridge.load_hf_weights(ddp_model)
+        try:
+            import slime_plugins.mbridge  # noqa: F401
+            from mbridge import AutoBridge as MBridgeAutoBridge
+
+            logger.info("Using mbridge.load_weights(memory_efficient=True) for HF -> Megatron initialization")
+            bridge = MBridgeAutoBridge.from_pretrained(load_path, trust_remote_code=True)
+            bridge.load_weights(ddp_model, load_path, memory_efficient=True)
+            logger.info("Finished HF -> Megatron initialization via mbridge.load_weights(memory_efficient=True)")
+        except Exception:
+            logger.exception(
+                "mbridge memory-efficient load failed; falling back to megatron.bridge.load_hf_weights"
+            )
+            _load_checkpoint_hf_via_megatron_bridge(ddp_model, load_path)
 
     # Copied from Megatron-core :: load_checkpoint (with simplifications)
     if (args.fp16 or args.bf16) and optimizer is not None:
@@ -150,6 +174,80 @@ def _load_checkpoint_hf(ddp_model, optimizer, args, load_path: str):
     return iteration, num_floating_point_operations_so_far
 
 
+def _load_checkpoint_hf_via_megatron_bridge(ddp_model, load_path: str) -> None:
+    from megatron.bridge import AutoBridge
+
+    import slime_plugins.megatron_bridge  # noqa: F401
+
+    logger.info("Constructing megatron.bridge AutoBridge from HF checkpoint...")
+    start = time.monotonic()
+    bridge = AutoBridge.from_hf_pretrained(load_path, trust_remote_code=True)
+    logger.info(
+        "Constructed megatron.bridge AutoBridge in %.1fs; starting load_hf_weights().",
+        time.monotonic() - start,
+    )
+
+    heartbeat_interval_s = int(os.environ.get("SLIME_BRIDGE_LOAD_HEARTBEAT_SECS", "60"))
+    done = threading.Event()
+
+    def _heartbeat() -> None:
+        while not done.wait(heartbeat_interval_s):
+            logger.info(
+                "Still running megatron.bridge.load_hf_weights(...) after %.1fs.",
+                time.monotonic() - start,
+            )
+
+    heartbeat = threading.Thread(target=_heartbeat, name="bridge-load-heartbeat", daemon=True)
+    heartbeat.start()
+
+    bridge.load_hf_weights(ddp_model)
+    done.set()
+    heartbeat.join(timeout=0.1)
+    logger.info("Finished HF -> Megatron initialization via megatron.bridge.load_hf_weights")
+
+
+def _read_hf_weight_map(load_path: str | Path) -> dict[str, str]:
+    index_path = Path(load_path) / "model.safetensors.index.json"
+    if not index_path.is_file():
+        return {}
+
+    try:
+        index_data = json.loads(index_path.read_text())
+    except Exception:
+        logger.exception("Failed to parse HF safetensors index at %s", index_path)
+        return {}
+
+    weight_map = index_data.get("weight_map", {})
+    return weight_map if isinstance(weight_map, dict) else {}
+
+
+def _hf_uses_composite_gpt_oss_moe_weights(load_path: str | Path) -> bool:
+    """Detect GPT-OSS checkpoints whose expert weights are stored as composite tensors.
+
+    GPT-OSS 120B stores expert tensors as layer-level composite entries such as
+    ``model.layers.0.mlp.experts.gate_up_proj_blocks`` rather than per-expert
+    ``...experts.<id>.gate_proj.weight`` tensors. The installed Megatron Bridge
+    loader knows how to map those names, while the memory-efficient mbridge path
+    currently assumes the per-expert layout.
+    """
+
+    for name in _read_hf_weight_map(load_path):
+        if re.fullmatch(
+            r"model\.layers\.\d+\.mlp\.experts\.(gate_up_proj|down_proj)(?:_(bias|blocks|scales))?",
+            name,
+        ):
+            return True
+
+    return False
+
+
 def _is_dir_nonempty(path):
     with os.scandir(path) as it:
         return any(it)
+
+
+def _is_existing_nonempty_dir(path: str | Path | None) -> bool:
+    if path is None:
+        return False
+    path = Path(path)
+    return path.is_dir() and _is_dir_nonempty(path)

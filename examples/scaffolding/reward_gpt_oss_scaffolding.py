@@ -4,12 +4,16 @@ from __future__ import annotations
 
 from slime.utils.types import Sample
 
-from examples.scaffolding.scaffolding_boxed import extract_last_boxed_integer, normalize_int_answer
+from examples.scaffolding.scaffolding_boxed import (
+    extract_last_boxed_integer,
+    extract_last_notebook_solver_integer,
+    normalize_int_answer,
+)
 
 
 def scalar_correctness_reward(response: str, label: str) -> float:
     """1.0 if the last \\boxed{} integer matches ground truth (no fixed answer range), else 0.0."""
-    pred = extract_last_boxed_integer(response)
+    pred = extract_last_notebook_solver_integer(response)
     if pred is None:
         return 0.0
     try:

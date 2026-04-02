@@ -83,7 +83,7 @@ def get_model_provider_func(
 
         return wrapped_model_provider
 
-    if args.megatron_to_hf_mode == "bridge":
+    if args.megatron_to_hf_mode == "bridge" and args.spec is None:
         from megatron.bridge import AutoBridge
 
         bridge = AutoBridge.from_hf_pretrained(args.hf_checkpoint, trust_remote_code=True)

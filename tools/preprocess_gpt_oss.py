@@ -21,58 +21,7 @@ from collections import OrderedDict
 import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
-
-
-def dequantize_mxfp4(
-    blocks: torch.Tensor,
-    scales: torch.Tensor,
-    dtype: torch.dtype = torch.bfloat16,
-) -> torch.Tensor:
-    """Dequantize MXFP4 weights to BF16. Adapted from megatron.bridge."""
-    FP4_VALUES = [
-        +0.0,
-        +0.5,
-        +1.0,
-        +1.5,
-        +2.0,
-        +3.0,
-        +4.0,
-        +6.0,
-        -0.0,
-        -0.5,
-        -1.0,
-        -1.5,
-        -2.0,
-        -3.0,
-        -4.0,
-        -6.0,
-    ]
-    scales = scales.to(torch.int32) - 127
-    lut = torch.tensor(FP4_VALUES, dtype=dtype, device=blocks.device)
-
-    *prefix_shape, G, B = blocks.shape
-    rows_total = math.prod(prefix_shape) * G
-
-    blocks_flat = blocks.reshape(rows_total, B)
-    scales_flat = scales.reshape(rows_total, 1)
-
-    out = torch.empty(rows_total, B * 2, dtype=dtype, device=blocks.device)
-
-    rows_per_chunk = 32768 * 1024
-    for r0 in range(0, rows_total, rows_per_chunk):
-        r1 = min(r0 + rows_per_chunk, rows_total)
-        blk = blocks_flat[r0:r1]
-        exp = scales_flat[r0:r1]
-
-        idx_lo = (blk & 0x0F).to(torch.long)
-        idx_hi = (blk >> 4).to(torch.long)
-
-        sub = out[r0:r1]
-        sub[:, 0::2] = lut[idx_lo]
-        sub[:, 1::2] = lut[idx_hi]
-        torch.ldexp(sub, exp, out=sub)
-
-    return out.reshape(*prefix_shape, G, B * 2).view(*prefix_shape, G * B * 2)
+from slime_plugins.mbridge.mxfp4_reference import convert_moe_packed_tensors_reference
 
 
 def preprocess_gpt_oss(input_dir: str, output_dir: str):
@@ -141,7 +90,7 @@ def preprocess_gpt_oss(input_dir: str, output_dir: str):
                         scales = _load_tensor_from_files(input_dir, files, scales_key)
 
                     print(f"  Dequantizing {base_name}...")
-                    dequantized = dequantize_mxfp4(tensor, scales)
+                    dequantized = convert_moe_packed_tensors_reference(tensor, scales)
                     _unfuse_experts(
                         base_name, dequantized, num_experts, intermediate_size, all_output_tensors, new_weight_map
                     )

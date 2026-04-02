@@ -6,8 +6,10 @@ sequences (THD format), which TE 2.10.0 does not support.
 """
 
 import math
+import os
 
 import torch
+import torch.nn.functional as F
 from flash_attn.flash_attn_interface import flash_attn_varlen_func
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.process_groups_config import ProcessGroupCollection
@@ -19,6 +21,103 @@ from megatron.core.utils import divide
 from torch import Tensor
 
 from slime_plugins.models.learnable_softmax_attention import learnable_softmax_flash_attn_varlen
+
+
+def _expand_kv_heads_for_gqa(kv: Tensor, num_query_heads: int) -> Tensor:
+    """Expand KV heads to match query heads for local fallback attention."""
+    if kv.size(1) == num_query_heads:
+        return kv
+    if num_query_heads % kv.size(1) != 0:
+        raise ValueError(
+            f"Cannot expand {kv.size(1)} KV heads to {num_query_heads} query heads for local attention fallback."
+        )
+    return kv.repeat_interleave(num_query_heads // kv.size(1), dim=1)
+
+
+def _safe_varlen_attention(
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    cu_seqlens_q: Tensor,
+    cu_seqlens_k: Tensor,
+    softmax_scale: float,
+    softmax_offset: Tensor | None,
+    causal: bool,
+    window_size: tuple[int, int],
+    dropout_p: float,
+    training: bool,
+) -> Tensor:
+    """Safe chunked-attention fallback for packed THD tensors.
+
+    This avoids flash-attn's varlen kernel on the long-context GPT-OSS training path we
+    exercise in Modal. For full attention we keep memory bounded by chunking queries;
+    for local attention the same code path only touches the relevant window.
+    """
+    left_window, right_window = window_size
+    if left_window < 0 and right_window < 0:
+        block_size = int(os.environ.get("SLIME_SAFE_VARLEN_ATTN_BLOCK_SIZE", "128"))
+    else:
+        block_size = int(os.environ.get("SLIME_SAFE_VARLEN_ATTN_BLOCK_SIZE", "1024"))
+    out = torch.empty_like(q)
+    q_heads = q.size(1)
+    offset_fp32 = softmax_offset.float() if softmax_offset is not None else None
+
+    for seq_idx in range(cu_seqlens_q.numel() - 1):
+        q_start = int(cu_seqlens_q[seq_idx].item())
+        q_end = int(cu_seqlens_q[seq_idx + 1].item())
+        k_start = int(cu_seqlens_k[seq_idx].item())
+        k_end = int(cu_seqlens_k[seq_idx + 1].item())
+
+        q_seq = q[q_start:q_end]
+        k_seq = _expand_kv_heads_for_gqa(k[k_start:k_end], q_heads)
+        v_seq = _expand_kv_heads_for_gqa(v[k_start:k_end], q_heads)
+        seq_len_q = q_end - q_start
+        seq_len_k = k_end - k_start
+
+        for block_q_start in range(0, seq_len_q, block_size):
+            block_q_end = min(block_q_start + block_size, seq_len_q)
+            q_chunk = q_seq[block_q_start:block_q_end]
+
+            if left_window >= 0:
+                block_k_start = max(0, block_q_start - left_window)
+            else:
+                block_k_start = 0
+
+            if causal:
+                max_k_index = block_q_end - 1 + max(right_window, 0)
+            elif right_window >= 0:
+                max_k_index = block_q_end - 1 + right_window
+            else:
+                max_k_index = seq_len_k - 1
+            block_k_end = min(seq_len_k, max_k_index + 1)
+
+            k_chunk = k_seq[block_k_start:block_k_end]
+            v_chunk = v_seq[block_k_start:block_k_end]
+
+            scores = torch.einsum("qhd,khd->qhk", q_chunk.float(), k_chunk.float()) * softmax_scale
+
+            q_positions = torch.arange(block_q_start, block_q_end, device=q.device).unsqueeze(1)
+            k_positions = torch.arange(block_k_start, block_k_end, device=q.device).unsqueeze(0)
+            valid = torch.ones((block_q_end - block_q_start, block_k_end - block_k_start), device=q.device, dtype=torch.bool)
+            if left_window >= 0:
+                valid &= k_positions >= (q_positions - left_window)
+            if right_window >= 0:
+                valid &= k_positions <= (q_positions + right_window)
+            if causal:
+                valid &= k_positions <= q_positions
+            scores = scores.masked_fill(~valid.unsqueeze(1), torch.finfo(scores.dtype).min)
+
+            lse = torch.logsumexp(scores, dim=-1)
+            probs = torch.softmax(scores, dim=-1)
+            if dropout_p > 0.0 and training:
+                probs = F.dropout(probs, p=dropout_p, training=True)
+
+            out_chunk = torch.einsum("qhk,khd->qhd", probs, v_chunk.float())
+            if offset_fp32 is not None:
+                out_chunk = out_chunk * torch.sigmoid(lse - offset_fp32.unsqueeze(0)).unsqueeze(-1)
+            out[q_start + block_q_start : q_start + block_q_end] = out_chunk.to(q.dtype)
+
+    return out
 
 
 class FlashDotProductAttention(MegatronModule):
@@ -146,7 +245,24 @@ class FlashDotProductAttention(MegatronModule):
             max_seqlen_q = s
             max_seqlen_k = s
 
-        if self.softmax_offset is not None:
+        force_safe_varlen = os.environ.get("SLIME_FORCE_SAFE_VARLEN_ATTN", "0") == "1"
+        use_safe_varlen = qkv_format == "thd" and (force_safe_varlen or self.window_size != (-1, -1))
+
+        if use_safe_varlen:
+            output = _safe_varlen_attention(
+                query,
+                key,
+                value,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                self.softmax_scale,
+                self.softmax_offset,
+                causal,
+                self.window_size,
+                dropout_p,
+                is_training,
+            )
+        elif self.softmax_offset is not None:
             # Use learnable softmax flash attention
             output = learnable_softmax_flash_attn_varlen(
                 query,

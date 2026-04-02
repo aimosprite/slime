@@ -1,3 +1,5 @@
+import os
+
 import ray
 
 from slime.ray.placement_group import create_placement_groups, create_rollout_manager, create_training_models
@@ -7,6 +9,9 @@ from slime.utils.misc import should_run_periodic_action
 
 
 def train(args):
+    if not ray.is_initialized():
+        ray.init(address=os.environ.get("RAY_ADDRESS"), ignore_reinit_error=True, include_dashboard=False)
+
     configure_logger()
     # allocate the GPUs
     pgs = create_placement_groups(args)

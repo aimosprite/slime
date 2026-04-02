@@ -4,7 +4,7 @@ Single entry: AIMO filtered JSONL + GPT-OSS (20B or 120B) + dual-group scaffoldi
 
 Environment:
   SLIME_SCRIPT_MODEL_SIZE: "20b" | "120b" (default: 20b)
-  SLIME_SCRIPT_HF_CHECKPOINT: path to HF weights (required)
+  SLIME_SCRIPT_HF_CHECKPOINT: Hugging Face Hub model id (e.g. openai/gpt-oss-20b) or local weights dir (required)
   SLIME_SCRIPT_DATA_JSONL: path to train_data_filtered.jsonl (required)
   SLIME_SCRIPT_NUM_GPUS: default 16 (sbatch scripts set 2 or 4)
   SLIME_SCRIPT_TP / SLIME_SCRIPT_EP / SLIME_SCRIPT_ETP: Megatron parallel sizes (defaults 2 / 1 / 1; ETP must stay 1 for GPT-OSS MoE+bias)
@@ -14,6 +14,8 @@ Environment:
   SLIME_SCRIPT_ROLLOUT_MAX_RESPONSE_LEN / SLIME_SCRIPT_ROLLOUT_MAX_CONTEXT_LEN: non-smoke rollout limits (defaults 8192 / 65536)
   SLIME_SCRIPT_SGLANG_MEM_FRACTION: optional override for --sglang-mem-fraction-static (default 0.75)
   SLIME_SCRIPT_MAX_TOKENS_PER_GPU: optional override for --max-tokens-per-gpu (default 4096)
+  SLIME_SCRIPT_LOG_PROBS_MAX_TOKENS_PER_GPU: optional override for --log-probs-max-tokens-per-gpu
+  SLIME_SCRIPT_ATTENTION_BACKEND: Megatron attention backend for Transformer Engine (default: flash)
   WANDB_API_KEY: optional; prompted if training with wandb and missing
 
 Example:
@@ -21,7 +23,7 @@ Example:
   export SLIME_SCRIPT_DATA_JSONL=/path/to/train_data_filtered.jsonl
   python examples/scaffolding/run_gpt_oss_scaffolding_rl.py
 
-Smoke test (20B only, few scaffolding attempts, one rollout step, --debug-rollout-only):
+Smoke test (few scaffolding attempts, one rollout step, one real train step):
   export SLIME_SCRIPT_HF_CHECKPOINT=/path/to/gpt-oss-20b
   export SLIME_SCRIPT_DATA_JSONL=/path/to/train_data_filtered.jsonl
   python examples/scaffolding/run_gpt_oss_scaffolding_rl.py --smoke
@@ -34,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import sys
 from pathlib import Path
 
@@ -72,9 +75,8 @@ def _default_data_path() -> str:
 
 
 def _apply_smoke_env_defaults() -> None:
-    """Defaults for `--smoke` when env vars are unset (20B, small batch, few attempts)."""
+    """Defaults for `--smoke` when env vars are unset (tiny end-to-end train run)."""
     defaults = {
-        "SLIME_SCRIPT_SKIP_WANDB": "1",
         "SLIME_SCRIPT_MODEL_SIZE": "20b",
         "SLIME_SCRIPT_NUM_GPUS": "2",
         "SLIME_SCRIPT_NUM_ROLLOUT": "1",
@@ -84,6 +86,9 @@ def _apply_smoke_env_defaults() -> None:
         "SLIME_SCRIPT_TP": "2",
         "SLIME_SCRIPT_EP": "1",
         "SLIME_SCRIPT_ETP": "1",
+        "SLIME_SCRIPT_SMOKE_ROLLOUT_MAX_RESPONSE_LEN": "1024",
+        "SLIME_SCRIPT_SMOKE_ROLLOUT_MAX_CONTEXT_LEN": "8192",
+        "SLIME_SCRIPT_SMOKE_DEBUG_ROLLOUT_PATH": "/tmp/slime-debug-rollout/{rollout_id}.pt",
     }
     for k, v in defaults.items():
         if not os.environ.get(k):
@@ -98,10 +103,14 @@ def _smoke_reward_checks() -> None:
     )
 
     assert scalar_correctness_reward("Thus the answer is \\boxed{42}", "42") == 1.0
+    assert scalar_correctness_reward("Thus the answer is \\boxed{ 42 }", "42") == 1.0
+    assert scalar_correctness_reward("final answer is 42", "42") == 1.0
     assert scalar_correctness_reward("Thus the answer is \\boxed{43}", "42") == 0.0
     assert scalar_correctness_reward("no boxed answer here", "42") == 0.0
     assert scalar_correctness_reward("wrong \\boxed{1} then \\boxed{42}", "42") == 1.0
+    assert scalar_correctness_reward("<|channel|>final<|message|>\\boxed{42.0}<|end|>", "42") == 0.0
     assert judge_selection_reward("\\boxed{42}", "42", {"42"}) == 1.0
+    assert judge_selection_reward("**Judgment:** [42]", "42", {"42"}) == 1.0
     assert judge_selection_reward("\\boxed{42}", "42", {"43"}) == 0.0
     assert judge_selection_reward("\\boxed{43}", "42", {"42", "43"}) == 0.0
     print("[smoke] reward checks OK (solver + judge selection; shared boxed extraction).")
@@ -125,14 +134,59 @@ def _smoke_config_consistency() -> None:
     )
 
 
-def _parse_launcher_args() -> argparse.Namespace:
+def _resolve_hf_checkpoint_to_local_dir(hf_ckpt: str) -> str:
+    """Megatron bridge loading needs a real directory; Hub ids must be cached locally first."""
+    path = Path(hf_ckpt).expanduser()
+    if path.is_dir():
+        print(f"[launcher] Using explicit local checkpoint dir: {path.resolve()}")
+        return str(path.resolve())
+
+    hf_home = Path(os.environ.get("HF_HOME", "~/.cache/huggingface")).expanduser()
+    repo_cache_dir = hf_home / "hub" / f"models--{hf_ckpt.strip().replace('/', '--')}"
+    if repo_cache_dir.is_dir():
+        refs_main = repo_cache_dir / "refs" / "main"
+        candidate_snapshot: Path | None = None
+        if refs_main.is_file():
+            revision = refs_main.read_text().strip()
+            if revision:
+                snapshot_dir = repo_cache_dir / "snapshots" / revision
+                if snapshot_dir.is_dir():
+                    candidate_snapshot = snapshot_dir
+        if candidate_snapshot is None:
+            snapshots_dir = repo_cache_dir / "snapshots"
+            snapshot_dirs = sorted(p for p in snapshots_dir.iterdir() if p.is_dir()) if snapshots_dir.is_dir() else []
+            if len(snapshot_dirs) == 1:
+                candidate_snapshot = snapshot_dirs[0]
+        if candidate_snapshot is not None:
+            print(f"[launcher] Using cached HF snapshot dir: {candidate_snapshot.resolve()}")
+            return str(candidate_snapshot.resolve())
+
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError as e:
+        raise ImportError(
+            "huggingface_hub is required for Hugging Face Hub checkpoint ids. "
+            "Install it or set SLIME_SCRIPT_HF_CHECKPOINT to a local weights directory."
+        ) from e
+    token = os.environ.get("HUGGING_FACE_HUB_TOKEN") or os.environ.get("HF_TOKEN")
+    try:
+        local_dir = snapshot_download(repo_id=hf_ckpt.strip(), token=token, local_files_only=True)
+        print(f"[launcher] Using local_files_only HF snapshot dir: {local_dir}")
+        return local_dir
+    except Exception:
+        pass
+    print(f"[launcher] Cache miss for {hf_ckpt.strip()} under HF_HOME={hf_home}; downloading from Hub.")
+    return snapshot_download(repo_id=hf_ckpt.strip(), token=token)
+
+
+def _parse_launcher_args() -> tuple[argparse.Namespace, list[str]]:
     p = argparse.ArgumentParser(description="GPT-OSS scaffolding RL launcher (see module docstring).")
     p.add_argument(
         "--smoke",
         action="store_true",
         help=(
-            "20B smoke: set small defaults, run reward/config checks, then train with "
-            "--debug-rollout-only (one rollout step, batch size 1 prompt)."
+            "Set small defaults when unset, run reward/config checks, then execute one tiny "
+            "end-to-end RL iteration (one rollout plus one real training step)."
         ),
     )
     p.add_argument(
@@ -140,11 +194,17 @@ def _parse_launcher_args() -> argparse.Namespace:
         action="store_true",
         help="Only run reward + config consistency checks (no Ray / GPUs).",
     )
-    return p.parse_args()
+    p.add_argument(
+        "--inference-only",
+        action="store_true",
+        help="Run rollout generation only via the SGLang rollout manager; skip Megatron training actors entirely.",
+    )
+    launcher_args, passthrough_args = p.parse_known_args()
+    return launcher_args, passthrough_args
 
 
 def main() -> None:
-    launcher_args = _parse_launcher_args()
+    launcher_args, passthrough_args = _parse_launcher_args()
     if launcher_args.smoke_rewards_only:
         _smoke_reward_checks()
         _smoke_config_consistency()
@@ -154,7 +214,13 @@ def main() -> None:
 
     if launcher_args.smoke:
         _apply_smoke_env_defaults()
-        os.environ.setdefault("SLIME_SCRIPT_SKIP_WANDB", "1")
+
+    if launcher_args.inference_only:
+        has_debug_rollout_only = any(
+            arg == "--debug-rollout-only" or arg.startswith("--debug-rollout-only=") for arg in passthrough_args
+        )
+        if not has_debug_rollout_only:
+            passthrough_args = [*passthrough_args, "--debug-rollout-only"]
 
     if not launcher_args.smoke:
         _prompt_wandb_if_needed()
@@ -165,12 +231,13 @@ def main() -> None:
     if model_size not in ("20b", "120b"):
         raise ValueError("SLIME_SCRIPT_MODEL_SIZE must be 20b or 120b")
 
-    if launcher_args.smoke and model_size != "20b":
-        raise ValueError("--smoke is only supported with gpt-oss-20b (set SLIME_SCRIPT_MODEL_SIZE=20b).")
-
     hf_ckpt = os.environ.get("SLIME_SCRIPT_HF_CHECKPOINT", "").strip()
     if not hf_ckpt:
-        raise ValueError("Set SLIME_SCRIPT_HF_CHECKPOINT to the local HuggingFace model directory.")
+        raise ValueError(
+            "Set SLIME_SCRIPT_HF_CHECKPOINT to a Hugging Face model id (e.g. openai/gpt-oss-20b) "
+            "or a local model directory."
+        )
+    hf_ckpt = _resolve_hf_checkpoint_to_local_dir(hf_ckpt)
 
     data_path = _default_data_path()
     if not Path(data_path).is_file():
@@ -189,14 +256,19 @@ def main() -> None:
 
     wandb_args = ""
     if os.environ.get("WANDB_API_KEY") and not os.environ.get("SLIME_SCRIPT_SKIP_WANDB"):
+        wandb_project = os.environ.get("SLIME_SCRIPT_WANDB_PROJECT", "slime-aimo-scaffolding").strip()
+        wandb_group = os.environ.get("SLIME_SCRIPT_WANDB_GROUP", "gpt-oss-scaffolding").strip()
+        wandb_team = os.environ.get("SLIME_SCRIPT_WANDB_TEAM", "").strip()
         wandb_args = (
             "--use-wandb "
-            "--wandb-project slime-aimo-scaffolding "
-            "--wandb-group gpt-oss-scaffolding "
+            f"--wandb-project {shlex.quote(wandb_project)} "
+            f"--wandb-group {shlex.quote(wandb_group)} "
             f"--wandb-key '{os.environ['WANDB_API_KEY']}' "
         )
+        if wandb_team:
+            wandb_args += f"--wandb-team {shlex.quote(wandb_team)} "
 
-    ckpt_args = f"--hf-checkpoint {hf_ckpt} "
+    ckpt_args = f"--hf-checkpoint {shlex.quote(hf_ckpt)} "
 
     num_rollout = os.environ.get("SLIME_SCRIPT_NUM_ROLLOUT", "64")
     rollout_bs = os.environ.get("SLIME_SCRIPT_ROLLOUT_BATCH_SIZE", "4")
@@ -204,13 +276,25 @@ def main() -> None:
     if launcher_args.smoke:
         rollout_max_resp = os.environ.get("SLIME_SCRIPT_SMOKE_ROLLOUT_MAX_RESPONSE_LEN", "4096")
         rollout_max_ctx = os.environ.get("SLIME_SCRIPT_SMOKE_ROLLOUT_MAX_CONTEXT_LEN", "16384")
-        # Align GBS with rollout batching when num_steps_per_rollout is set.
         num_steps_per_rollout = "1"
-        gbs = int(rollout_bs) * n_sp // int(num_steps_per_rollout)
-        smoke_extra = (
-            "--debug-rollout-only "
-            f"--num-steps-per-rollout {num_steps_per_rollout} "
+        gbs = int(
+            os.environ.get(
+                "SLIME_SCRIPT_GLOBAL_BATCH_SIZE",
+                str(int(rollout_bs) * n_sp // int(num_steps_per_rollout)),
+            )
         )
+        smoke_extra = f"--num-steps-per-rollout {num_steps_per_rollout} "
+        has_debug_rollout_override = any(
+            arg == "--load-debug-rollout-data"
+            or arg.startswith("--load-debug-rollout-data=")
+            or arg == "--save-debug-rollout-data"
+            or arg.startswith("--save-debug-rollout-data=")
+            for arg in passthrough_args
+        )
+        if not has_debug_rollout_override:
+            smoke_debug_rollout_path = os.environ.get("SLIME_SCRIPT_SMOKE_DEBUG_ROLLOUT_PATH", "").strip()
+            if smoke_debug_rollout_path:
+                smoke_extra += f"--save-debug-rollout-data {shlex.quote(smoke_debug_rollout_path)} "
     else:
         rollout_max_resp = os.environ.get("SLIME_SCRIPT_ROLLOUT_MAX_RESPONSE_LEN", "8192")
         rollout_max_ctx = os.environ.get("SLIME_SCRIPT_ROLLOUT_MAX_CONTEXT_LEN", "65536")
@@ -243,16 +327,22 @@ def main() -> None:
         "--eps-clip 0.2 "
         "--eps-clip-high 0.28 "
     )
+    passthrough_args_str = " ".join(shlex.quote(arg) for arg in passthrough_args)
+    if passthrough_args_str:
+        passthrough_args_str += " "
 
     lora_lr = os.environ.get("SLIME_SCRIPT_LORA_LR", "2e-4")
-    lora_args = (
-        "--enable-lora "
-        "--lora-r 8 "
-        "--lora-alpha 32 "
-        "--lora-dropout 0.0 "
-        f"--lora-lr {lora_lr} "
-        "--lora-target-policy mlp_moe_only "
-    )
+    enable_lora = os.environ.get("SLIME_SCRIPT_ENABLE_LORA", "1").strip().lower() not in {"0", "false", "no"}
+    lora_args = ""
+    if enable_lora:
+        lora_args = (
+            "--enable-lora "
+            "--lora-r 8 "
+            "--lora-alpha 32 "
+            "--lora-dropout 0.0 "
+            f"--lora-lr {lora_lr} "
+            "--lora-target-policy mlp_moe_only "
+        )
 
     optim_args = (
         "--optimizer adam "
@@ -265,16 +355,25 @@ def main() -> None:
 
     sglang_mem = os.environ.get("SLIME_SCRIPT_SGLANG_MEM_FRACTION", "0.75")
     max_tok = os.environ.get("SLIME_SCRIPT_MAX_TOKENS_PER_GPU", "4096")
+    log_probs_max_tok = os.environ.get("SLIME_SCRIPT_LOG_PROBS_MAX_TOKENS_PER_GPU", "").strip()
     sglang_args = (
         f"--rollout-num-gpus-per-engine {os.environ.get('SLIME_SCRIPT_ROLLOUT_TP', '2')} "
+        f"--sglang-ep-size {os.environ.get('SLIME_SCRIPT_SGLANG_EP_SIZE', '1')} "
         f"--sglang-mem-fraction-static {sglang_mem} "
     )
+    dynamic_batch_args = (
+        "--use-dynamic-batch-size "
+        f"--max-tokens-per-gpu {max_tok} "
+    )
+    if log_probs_max_tok:
+        dynamic_batch_args += f"--log-probs-max-tokens-per-gpu {log_probs_max_tok} "
 
     # Colocated train+rollout on the same GPUs; tune TP/EP/ETP via env (see sbatch scripts).
     tp = os.environ.get("SLIME_SCRIPT_TP", "2")
     ep = os.environ.get("SLIME_SCRIPT_EP", "1")
     # MoE + bias: Megatron requires expert tensor parallel size 1 (see e.g. other run-*.sh MoE configs).
     etp = os.environ.get("SLIME_SCRIPT_ETP", "1")
+    attention_backend = os.environ.get("SLIME_SCRIPT_ATTENTION_BACKEND", "flash").strip()
     misc_args = (
         "--actor-num-nodes 1 "
         f"--actor-num-gpus-per-node {num_gpus} "
@@ -296,14 +395,15 @@ def main() -> None:
             f"--tensor-model-parallel-size {tp} "
             f"--expert-model-parallel-size {ep} "
             f"--expert-tensor-parallel-size {etp} "
+            f"--attention-backend {attention_backend} "
             "--sequence-parallel "
             "--pipeline-model-parallel-size 1 "
             "--context-parallel-size 1 "
             "--recompute-granularity full "
             "--recompute-method uniform "
             "--recompute-num-layers 1 "
-            "--use-dynamic-batch-size "
-            f"--max-tokens-per-gpu {max_tok} "
+            f"{dynamic_batch_args} "
+            f"{passthrough_args_str}"
             f"{misc_args} "
         )
         meg_type = megatron_model_type
@@ -317,6 +417,7 @@ def main() -> None:
             f"{wandb_args} "
             "--train-backend fsdp "
             "--gradient-checkpointing "
+            f"{passthrough_args_str}"
             f"{misc_args} "
         )
         meg_type = None
@@ -330,16 +431,25 @@ def main() -> None:
     if launcher_args.smoke:
         _smoke_reward_checks()
         _smoke_config_consistency()
+        mode_label = "inference-only tiny rollout" if launcher_args.inference_only else "end-to-end tiny RL run"
         print(
-            f"[smoke] Launching debug-rollout-only: num_rollout={num_rollout}, "
+            f"[smoke] Launching {mode_label}: num_rollout={num_rollout}, "
             f"rollout_batch_size={rollout_bs}, n_samples_per_prompt={n_sp}, global_batch_size={gbs}, "
-            f"gpus={num_gpus}."
+            f"gpus={num_gpus}, num_steps_per_rollout=1."
         )
+        smoke_debug_rollout_path = os.environ.get("SLIME_SCRIPT_SMOKE_DEBUG_ROLLOUT_PATH", "").strip()
+        if smoke_debug_rollout_path:
+            print(f"[smoke] Debug rollout path template: {smoke_debug_rollout_path}")
 
     execute_train(
         train_args=train_args,
         num_gpus_per_node=num_gpus,
         megatron_model_type=meg_type,
+        train_script=(
+            "examples/scaffolding/run_gpt_oss_scaffolding_inference_only.py"
+            if launcher_args.inference_only
+            else "train.py"
+        ),
         extra_env_vars=extra_env,
     )
 

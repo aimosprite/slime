@@ -33,6 +33,15 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
+FORWARDED_ROLLOUT_ENV_VARS = (
+    "PYTHONPATH",
+    "MASTER_ADDR",
+    "no_proxy",
+    "HF_TOKEN",
+    "HUGGING_FACE_HUB_TOKEN",
+    "HF_HOME",
+)
+
 
 @dataclasses.dataclass
 class EngineGroup:
@@ -101,8 +110,16 @@ class EngineGroup:
                     "SGLANG_BATCH_INVARIANT_OPS_ENABLE_MM_FALLBACK_VARIANT": "true",
                     "SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION": "false",
                     "SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_IDLE": "false",
+                    # The /health_generate path is flaky for GPT-OSS startup and can block
+                    # engine.init() long after the HTTP server is otherwise usable.
+                    "SLIME_SGLANG_HEALTH_MODE": "basic",
+                    # Matching the direct working path avoids startup hangs on a busy queue.
+                    "SLIME_SGLANG_SKIP_FLUSH_CACHE": "1",
+                    # Re-enable the repo-level sitecustomize hook only inside SGLang worker
+                    # processes so TP workers receive the GPT-OSS weight-loader compat patch.
+                    "SLIME_ENABLE_GLOBAL_SGLANG_PATCH": "1",
                 }.items()
-            }
+            } | {name: os.environ[name] for name in FORWARDED_ROLLOUT_ENV_VARS if os.environ.get(name)}
 
             rollout_engine = RolloutRayActor.options(
                 num_cpus=num_cpus,
@@ -416,6 +433,15 @@ class RolloutManager:
                 logger.info(
                     f"Subsample loaded debug rollout data using {ratio=} and change num rows {original_num_rows} -> {len(data)}"
                 )
+            if (repeat_to := os.environ.get("SLIME_DEBUG_ROLLOUT_REPEAT_TO")) is not None:
+                target_num_rows = int(repeat_to)
+                if target_num_rows > len(data):
+                    original_num_rows = len(data)
+                    data = [Sample.from_dict(data[i % original_num_rows].to_dict()) for i in range(target_num_rows)]
+                    logger.info(
+                        "Repeated loaded debug rollout data to satisfy smoke replay size requirements: "
+                        f"{original_num_rows} -> {len(data)} rows"
+                    )
             metrics = None
         else:
             data = call_rollout_fn(self.generate_rollout, self.args, rollout_id, self.data_source, evaluation=False)

@@ -37,11 +37,21 @@ class ScaffoldingCFG:
     workers: int = 20
     turns: int = 128
     gen_select_threshold: int = 4  # notebook parity; unused in slime rollout
-    # Stochastic judges for diverse GRPO groups (override via SLIME_SCAFFOLDING_JUDGE_TEMPERATURE).
-    judge_temperature: float = 1.0
+    # Override via SLIME_SCAFFOLDING_JUDGE_TEMPERATURE when needed.
+    judge_temperature: float = 0.0
     judge_max_tokens: int = 32768
     buffer_tokens: int = 512
     search_tokens: int = 32
+    generation_chunk_tokens: int = 0
+    use_streaming: bool = True
+    stall_warning_tokens: int = 2048
+    stall_fail_tokens: int = 0
+    first_tool_retry_tokens: int = 0
+    first_tool_retry_limit: int = 0
+    harmony_python_fewshot: bool = False
+    harmony_force_python_prefix_after_retry: bool = False
+    analysis_only_warning_turns: int = 0
+    analysis_only_fail_turns: int = 0
     min_p: float = 0.02
     temperature: float = 1.0
     # Dynamic per-problem budget: problems_remaining in notebook starts at 50
@@ -65,10 +75,22 @@ class ScaffoldingCFG:
             workers=_env_int(f"{p}WORKERS", 20),
             turns=_env_int(f"{p}TURNS", 128),
             gen_select_threshold=_env_int(f"{p}GEN_SELECT_THRESHOLD", 4),
-            judge_temperature=_env_float(f"{p}JUDGE_TEMPERATURE", 1.0),
+            judge_temperature=_env_float(f"{p}JUDGE_TEMPERATURE", 0.0),
             judge_max_tokens=_env_int(f"{p}JUDGE_MAX_TOKENS", 32768),
             buffer_tokens=_env_int(f"{p}BUFFER_TOKENS", 512),
             search_tokens=_env_int(f"{p}SEARCH_TOKENS", 32),
+            generation_chunk_tokens=_env_int(f"{p}GENERATION_CHUNK_TOKENS", 0),
+            use_streaming=bool(_env_int(f"{p}USE_STREAMING", 1)),
+            stall_warning_tokens=_env_int(f"{p}STALL_WARNING_TOKENS", 2048),
+            stall_fail_tokens=_env_int(f"{p}STALL_FAIL_TOKENS", 0),
+            first_tool_retry_tokens=_env_int(f"{p}FIRST_TOOL_RETRY_TOKENS", 0),
+            first_tool_retry_limit=_env_int(f"{p}FIRST_TOOL_RETRY_LIMIT", 0),
+            harmony_python_fewshot=bool(_env_int(f"{p}HARMONY_PYTHON_FEWSHOT", 0)),
+            harmony_force_python_prefix_after_retry=bool(
+                _env_int(f"{p}HARMONY_FORCE_PYTHON_PREFIX_AFTER_RETRY", 0)
+            ),
+            analysis_only_warning_turns=_env_int(f"{p}ANALYSIS_ONLY_WARNING_TURNS", 0),
+            analysis_only_fail_turns=_env_int(f"{p}ANALYSIS_ONLY_FAIL_TURNS", 0),
             min_p=_env_float(f"{p}MIN_P", 0.02),
             temperature=_env_float(f"{p}TEMPERATURE", 1.0),
             problems_remaining_default=_env_int(f"{p}PROBLEMS_REMAINING", 50),
@@ -77,9 +99,16 @@ class ScaffoldingCFG:
 
 SYSTEM_PROMPT = (
     "You are a world-class International Mathematical Olympiad (IMO) competitor. "
-    "Solve the problem step by step. You may execute short Python code via the "
-    "tool when helpful. When you have the final answer, put it in \\boxed{} as an integer."
+    "The final answer must be a non-negative integer between 0 and 99999. "
+    "You must place the final integer answer inside \\boxed{}."
 )
+
+TOOL_PROMPT = (
+    "Use this tool to execute Python code. The environment is a stateful Jupyter notebook. "
+    "You must use print() to output results."
+)
+
+PREFERENCE_PROMPT = "You have access to `math`, `numpy` and `sympy` to solve the problem."
 
 # Kept in lockstep with examples/scaffolding/gen-select-nb.ipynb (cell defining GEN_SELECT_PROMPT).
 GEN_SELECT_PROMPT = """\

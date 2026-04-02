@@ -6,6 +6,26 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from slime.ray.utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST
 
+FORWARDED_TRAIN_ENV_VARS = (
+    "PYTHONPATH",
+    "MASTER_ADDR",
+    "CUDA_DEVICE_MAX_CONNECTIONS",
+    "CUDA_LAUNCH_BLOCKING",
+    "NCCL_NVLS_ENABLE",
+    "NCCL_DEBUG",
+    "NCCL_DEBUG_SUBSYS",
+    "no_proxy",
+    "NVTE_DEBUG",
+    "NVTE_DEBUG_LEVEL",
+    "NVTE_ALLOW_NONDETERMINISTIC_ALGO",
+    "HF_TOKEN",
+    "HUGGING_FACE_HUB_TOKEN",
+    "HF_HOME",
+    "WANDB_API_KEY",
+    "SLIME_FORCE_SAFE_VARLEN_ATTN",
+    "SLIME_SAFE_VARLEN_ATTN_BLOCK_SIZE",
+)
+
 
 class RayTrainGroup:
     """
@@ -55,6 +75,7 @@ class RayTrainGroup:
             # we need also set it to 0 to prevent nccl error.
             "NCCL_CUMEM_ENABLE": os.environ.get("NCCL_CUMEM_ENABLE", "0"),
             "NVTE_FP8_BLOCK_SCALING_FP32_SCALES": os.environ.get("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", "1"),
+            **{name: os.environ[name] for name in FORWARDED_TRAIN_ENV_VARS if os.environ.get(name)},
             **{name: "1" for name in NOSET_VISIBLE_DEVICES_ENV_VARS_LIST},
             **self.args.train_env_vars,
         }

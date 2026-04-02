@@ -43,8 +43,7 @@ MODEL_ARGS=(
     --moe-router-score-function softmax
     --moe-router-load-balancing-type none
     --moe-aux-loss-coeff 0.0
-    --moe-token-dispatcher-type alltoall
-    --moe-grouped-gemm
+    --moe-token-dispatcher-type "${SLIME_SCRIPT_MOE_TOKEN_DISPATCHER_TYPE:-alltoall}"
     # GPT-OSS specific
     --quick-geglu
     --glu-linear-offset 1.0
@@ -53,3 +52,19 @@ MODEL_ARGS=(
     --window-size 128,0
     --activation-func-clamp-value 7.0
 )
+
+if [[ "${SLIME_SCRIPT_ENABLE_MOE_DEEPEP:-0}" == "1" ]]; then
+    MODEL_ARGS+=(--moe-enable-deepep)
+fi
+
+if [[ "${SLIME_SCRIPT_MOE_TOKEN_DISPATCHER_TYPE:-alltoall}" == "flex" && -n "${SLIME_SCRIPT_MOE_FLEX_DISPATCHER_BACKEND:-}" ]]; then
+    MODEL_ARGS+=(--moe-flex-dispatcher-backend "${SLIME_SCRIPT_MOE_FLEX_DISPATCHER_BACKEND}")
+fi
+
+if [[ "${SLIME_SCRIPT_DISABLE_MOE_PERMUTE_FUSION:-0}" != "1" ]]; then
+    MODEL_ARGS+=(--moe-permute-fusion)
+fi
+
+if [[ "${SLIME_SCRIPT_DISABLE_MOE_GROUPED_GEMM:-0}" != "1" ]]; then
+    MODEL_ARGS+=(--moe-grouped-gemm)
+fi

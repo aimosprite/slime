@@ -794,9 +794,19 @@ def initialize_model_and_optimizer(
         filesystem_async_module.FileSystemWriterAsync = ROCmFileSystemWriterAsync
         print("[ROCm] Applied FileSystemWriterAsync patch for HIP compatibility")
 
+    trace_enabled = os.environ.get("SLIME_BRIDGE_REPRO_TRACE_INIT", "").strip().lower() in {"1", "true", "yes"}
+    if trace_enabled:
+        print(f"[bridge-repro-model] initialize_model_and_optimizer start role={role}", flush=True)
+        print("[bridge-repro-model] calling setup_model_and_optimizer", flush=True)
+
     model, optimizer, opt_param_scheduler = setup_model_and_optimizer(args, role)
+
+    if trace_enabled:
+        print("[bridge-repro-model] setup_model_and_optimizer complete", flush=True)
     model[0].role = role
     clear_memory()
+    if trace_enabled:
+        print("[bridge-repro-model] calling load_checkpoint", flush=True)
     iteration, _ = load_checkpoint(
         model,
         optimizer,
@@ -804,8 +814,12 @@ def initialize_model_and_optimizer(
         checkpointing_context={},
         skip_load_to_model_and_opt=False,
     )
+    if trace_enabled:
+        print(f"[bridge-repro-model] load_checkpoint complete iteration={iteration}", flush=True)
     clear_memory()
 
     opt_param_scheduler.step(increment=iteration * args.global_batch_size)
+    if trace_enabled:
+        print("[bridge-repro-model] initialize_model_and_optimizer complete", flush=True)
 
     return model, optimizer, opt_param_scheduler, iteration

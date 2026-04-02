@@ -6,6 +6,8 @@ import datetime
 import json
 import os
 import random
+import shlex
+import socket
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -104,7 +106,8 @@ def execute_train(
     if config is None:
         config = ExecuteTrainConfig()
     external_ray = get_bool_env_var("SLIME_SCRIPT_EXTERNAL_RAY")
-    master_addr = os.environ.get("MASTER_ADDR", "127.0.0.1")
+    use_ray_submit = get_bool_env_var("SLIME_SCRIPT_ENABLE_RAY_SUBMIT", "1")
+    master_addr = _resolve_master_addr()
 
     train_backend_fsdp = "--train-backend fsdp" in train_args
     assert train_backend_fsdp == (megatron_model_type is None)
@@ -127,10 +130,18 @@ def execute_train(
     )
 
     if not external_ray:
+        system_config = {}
+        worker_register_timeout = os.environ.get("SLIME_SCRIPT_RAY_WORKER_REGISTER_TIMEOUT_SECONDS")
+        if worker_register_timeout:
+            system_config["worker_register_timeout_seconds"] = int(worker_register_timeout)
+        system_config_arg = ""
+        if system_config:
+            system_config_arg = f" --system-config={shlex.quote(json.dumps(system_config))}"
         exec_command(
             # will prevent ray from buffering stdout/stderr
             f"export PYTHONBUFFERED=16 && "
-            f"ray start --head --node-ip-address {master_addr} --num-gpus {num_gpus_per_node} --disable-usage-stats"
+            f"ray start --head --node-ip-address {master_addr} --num-gpus {num_gpus_per_node} "
+            f"--disable-usage-stats{system_config_arg}"
         )
 
     if (f := before_ray_job_submit) is not None:
@@ -152,6 +163,9 @@ def execute_train(
                 "no_proxy": f"127.0.0.1,{master_addr}",
                 # This is needed by megatron / torch distributed in multi-node setup
                 "MASTER_ADDR": master_addr,
+                # In direct-launch mode we still start a local Ray head above; point the
+                # training driver at that cluster instead of letting ray.init() bootstrap one.
+                **({"RAY_ADDRESS": "auto"} if (not external_ray and not use_ray_submit) else {}),
                 **(
                     {
                         "CUDA_ENABLE_COREDUMP_ON_EXCEPTION": "1",
@@ -168,18 +182,31 @@ def execute_train(
         }
     )
 
-    if get_bool_env_var("SLIME_SCRIPT_ENABLE_RAY_SUBMIT", "1"):
-        cmd_megatron_model_source = (
-            f'source "{repo_base_dir}/scripts/models/{megatron_model_type}.sh" && '
-            if megatron_model_type is not None
-            else ""
-        )
+    cmd_megatron_model_source = (
+        f'source "{repo_base_dir}/scripts/models/{megatron_model_type}.sh" && '
+        if megatron_model_type is not None
+        else ""
+    )
+    if use_ray_submit:
         exec_command(
             f"export no_proxy=127.0.0.1 && export PYTHONBUFFERED=16 && "
             f"{cmd_megatron_model_source}"
             f'ray job submit --address="http://127.0.0.1:8265" '
             f"--runtime-env-json='{runtime_env_json}' "
             f"-- python3 {train_script} "
+            f"{'${MODEL_ARGS[@]}' if megatron_model_type is not None else ''} "
+            f"{train_args}"
+        )
+    else:
+        runtime_env_vars = json.loads(runtime_env_json)["env_vars"]
+        env_exports = "".join(
+            f"export {key}={shlex.quote(str(value))} && " for key, value in runtime_env_vars.items()
+        )
+        exec_command(
+            f"export no_proxy=127.0.0.1,{master_addr} && export PYTHONBUFFERED=16 && "
+            f"{env_exports}"
+            f"{cmd_megatron_model_source}"
+            f"python3 {train_script} "
             f"{'${MODEL_ARGS[@]}' if megatron_model_type is not None else ''} "
             f"{train_args}"
         )
@@ -190,6 +217,32 @@ def _parse_extra_env_vars(text: str):
         return json.loads(text)
     except ValueError:
         return {kv[0]: kv[1] for item in text.split(" ") if item.strip() != "" if (kv := item.split("=")) or True}
+
+
+def _resolve_master_addr() -> str:
+    master_addr = os.environ.get("MASTER_ADDR")
+    if master_addr:
+        return master_addr
+
+    candidates: list[str] = []
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            candidates.append(sock.getsockname()[0])
+    except OSError:
+        pass
+
+    try:
+        candidates.append(socket.gethostbyname(socket.gethostname()))
+    except OSError:
+        pass
+
+    for candidate in candidates:
+        if candidate and not candidate.startswith("127."):
+            return candidate
+
+    return "127.0.0.1"
 
 
 def check_has_nvlink():

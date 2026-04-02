@@ -1,0 +1,1 @@
+{"id":"fib100_mod_100000","question":"Compute the 100th Fibonacci number modulo 100000. You should use the python notebook to calculate it exactly.","ground_truth":"15075"}

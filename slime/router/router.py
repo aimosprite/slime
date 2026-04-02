@@ -7,11 +7,28 @@ import httpx
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from starlette.responses import Response
+from starlette.background import BackgroundTask
+from starlette.responses import Response, StreamingResponse
 
 from slime.utils.misc import load_function
 
 logger = logging.getLogger(__name__)
+
+_HOP_BY_HOP_HEADERS = {
+    "content-length",
+    "transfer-encoding",
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailers",
+    "upgrade",
+}
+
+
+def _filter_response_headers(headers: dict[str, str]) -> dict[str, str]:
+    return {k: v for k, v in headers.items() if k.lower() not in _HOP_BY_HOP_HEADERS}
 
 
 def run_router(args):
@@ -137,8 +154,38 @@ class SlimeRouter:
         # Get request body and headers
         body = await request.body()
         headers = dict(request.headers)
+        stream_requested = False
+        if request.method.upper() == "POST":
+            try:
+                payload = json.loads(body.decode("utf-8")) if body else {}
+                stream_requested = bool(payload.get("stream"))
+            except Exception:
+                stream_requested = False
 
         try:
+            if stream_requested:
+                stream_cm = self.client.stream(request.method, url, content=body, headers=headers)
+                response = await stream_cm.__aenter__()
+                response_headers = _filter_response_headers(dict(response.headers))
+                content_type = response.headers.get("content-type", "text/event-stream")
+
+                async def _body_iter():
+                    try:
+                        async for chunk in response.aiter_raw():
+                            yield chunk
+                    finally:
+                        await response.aclose()
+                        await stream_cm.__aexit__(None, None, None)
+
+                background = BackgroundTask(self._finish_url, worker_url)
+                return StreamingResponse(
+                    _body_iter(),
+                    status_code=response.status_code,
+                    headers=response_headers,
+                    media_type=content_type or None,
+                    background=background,
+                )
+
             response = await self.client.request(request.method, url, content=body, headers=headers)
             # Eagerly read content so we can return JSON (not streaming)
             content = await response.aread()
@@ -156,7 +203,7 @@ class SlimeRouter:
                 return Response(
                     content=content,
                     status_code=response.status_code,
-                    headers=dict(response.headers),
+                    headers=_filter_response_headers(dict(response.headers)),
                     media_type=content_type or None,
                 )
             finally:

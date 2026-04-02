@@ -5,6 +5,7 @@ import socket
 from argparse import Namespace
 from contextlib import nullcontext
 
+print("[bridge-repro-actor] importing ray/torch/megatron deps", flush=True)
 import ray
 import torch
 import torch.distributed as dist
@@ -12,6 +13,8 @@ from megatron.core import mpu
 from ray.actor import ActorHandle
 from torch_memory_saver import torch_memory_saver
 from transformers import AutoConfig, AutoTokenizer
+
+print("[bridge-repro-actor] importing slime megatron helpers", flush=True)
 
 from slime.ray.train_actor import TrainRayActor
 from slime.utils import train_dump_utils
@@ -37,9 +40,37 @@ from .update_weight.common import named_params_and_buffers
 from .update_weight.update_weight_from_distributed import UpdateWeightFromDistributed
 from .update_weight.update_weight_from_tensor import UpdateWeightFromTensor
 
+print("[bridge-repro-actor] actor module imports loaded", flush=True)
+
 logging.getLogger("megatron").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
+
+
+def _bridge_repro_trace(message: str) -> None:
+    if os.environ.get("SLIME_BRIDGE_REPRO_TRACE_INIT", "").strip().lower() not in {"1", "true", "yes"}:
+        return
+    print(f"[bridge-repro-actor] {message}", flush=True)
+
+
+def _resolve_hf_vocab_size(hf_config, tokenizer) -> int:
+    config = getattr(hf_config, "text_config", hf_config)
+    config_vocab_size = getattr(config, "vocab_size", None)
+    tokenizer_vocab_size = getattr(tokenizer, "vocab_size", None)
+
+    if config_vocab_size is not None:
+        if tokenizer_vocab_size is not None and config_vocab_size != tokenizer_vocab_size:
+            logger.info(
+                "Using HF config vocab_size=%s instead of tokenizer.vocab_size=%s.",
+                config_vocab_size,
+                tokenizer_vocab_size,
+            )
+        return int(config_vocab_size)
+
+    if tokenizer_vocab_size is None:
+        raise ValueError("Could not determine vocab_size from either HF config or tokenizer.")
+
+    return int(tokenizer_vocab_size)
 
 
 class MegatronTrainRayActor(TrainRayActor):
@@ -51,31 +82,41 @@ class MegatronTrainRayActor(TrainRayActor):
         with_ref: bool = False,
         with_opd_teacher: bool = False,
     ) -> int | None:
+        _bridge_repro_trace(f"init start role={role} with_ref={with_ref} with_opd_teacher={with_opd_teacher}")
         monkey_patch_torch_dist()
 
         super().init(args, role, with_ref, with_opd_teacher)
+        _bridge_repro_trace("super().init complete")
 
         if args.debug_rollout_only:
+            _bridge_repro_trace("debug_rollout_only -> returning 0")
             return 0
 
+        _bridge_repro_trace("calling megatron initialize.init(args)")
         init(args)
+        _bridge_repro_trace("megatron initialize.init(args) complete")
 
         if is_megatron_main_rank():
             init_tracking(args, primary=False)
+            _bridge_repro_trace("init_tracking complete on megatron main rank")
 
         self.prof = TrainProfiler(args)
+        _bridge_repro_trace("TrainProfiler constructed")
 
         # read config and tokenizer serialized to prevent concurrent writing bug.
+        _bridge_repro_trace("starting serialized HF config/tokenizer load")
         for i in range(args.num_gpus_per_node):
             if i == dist.get_rank() % args.num_gpus_per_node:
                 self.hf_config = AutoConfig.from_pretrained(args.hf_checkpoint, trust_remote_code=True)
                 self.tokenizer = AutoTokenizer.from_pretrained(self.args.hf_checkpoint, trust_remote_code=True)
             dist.barrier(group=get_gloo_group())
+        _bridge_repro_trace("serialized HF config/tokenizer load complete")
 
         self.train_parallel_config = {
             "dp_size": mpu.get_data_parallel_world_size(with_context_parallel=False),
         }
         dist.barrier(group=get_gloo_group())
+        _bridge_repro_trace(f"train_parallel_config ready: {self.train_parallel_config}")
 
         if args.offload_train:
             if (x := args.train_memory_margin_bytes) > 0:
@@ -88,9 +129,11 @@ class MegatronTrainRayActor(TrainRayActor):
             self.args.lr = self.args.critic_lr
             self.args.lr_warmup_iters = self.args.critic_lr_warmup_iters
 
+        _bridge_repro_trace("calling initialize_model_and_optimizer")
         (self.model, self.optimizer, self.opt_param_scheduler, loaded_rollout_id) = initialize_model_and_optimizer(
             args, role
         )
+        _bridge_repro_trace(f"initialize_model_and_optimizer complete loaded_rollout_id={loaded_rollout_id}")
 
         if role == "critic":
             if self.args.offload_train:
@@ -99,6 +142,7 @@ class MegatronTrainRayActor(TrainRayActor):
 
         start_rollout_id = loaded_rollout_id + 1
 
+        _bridge_repro_trace("creating weights_backuper")
         self.weights_backuper = TensorBackuper.create(
             source_getter=lambda: named_params_and_buffers(
                 self.args,
@@ -110,13 +154,16 @@ class MegatronTrainRayActor(TrainRayActor):
         )
         self._active_model_tag: str | None = "actor"
         self.weights_backuper.backup("actor")
+        _bridge_repro_trace("weights_backuper ready and actor backup complete")
 
         if with_ref:
             self.load_other_checkpoint("ref", args.ref_load)
+            _bridge_repro_trace("ref checkpoint loaded")
 
         # Load teacher model for Megatron-based on-policy distillation
         if with_opd_teacher:
             self.load_other_checkpoint("teacher", args.opd_teacher_load)
+            _bridge_repro_trace("teacher checkpoint loaded")
 
         if self.args.keep_old_actor:
             # Load old_actor checkpoint
@@ -124,18 +171,44 @@ class MegatronTrainRayActor(TrainRayActor):
             # Create rollout_actor as a copy of current actor
             if args.update_weights_interval == 1:
                 self.weights_backuper.backup("rollout_actor")
+            _bridge_repro_trace("old_actor / rollout_actor backup complete")
 
         if self.args.vocab_size is None:
-            self.args.vocab_size = self.tokenizer.vocab_size
+            self.args.vocab_size = _resolve_hf_vocab_size(self.hf_config, self.tokenizer)
+
+        use_live_bridge_weights = (
+            os.environ.get("SLIME_BRIDGE_USE_LIVE_ACTOR_WEIGHTS", "").strip().lower() in {"1", "true", "yes"}
+        )
+        if self.args.megatron_to_hf_mode == "bridge" and use_live_bridge_weights:
+            # Debug escape hatch: keep the old bridge path available, but do not use it by default.
+            # The cheap GPT-OSS 20B bridge repro shows that some live actor Parameters are already
+            # unsafe to clone or move to CPU immediately after HF -> Megatron load.
+            weight_update_getter = lambda: dict(
+                named_params_and_buffers(
+                    self.args,
+                    self.model,
+                    convert_to_global_name=False,
+                    translate_gpu_to_cpu=False,
+                )
+            )
+            _bridge_repro_trace("weight_updater getter uses live actor tensors for bridge mode")
+        else:
+            weight_update_getter = lambda: self.weights_backuper.get("actor")
+            if self.args.megatron_to_hf_mode == "bridge":
+                _bridge_repro_trace("weight_updater getter uses TensorBackuper actor snapshot for bridge mode")
+            else:
+                _bridge_repro_trace("weight_updater getter uses TensorBackuper actor snapshot")
 
         update_weight_cls = UpdateWeightFromTensor if self.args.colocate else UpdateWeightFromDistributed
+        _bridge_repro_trace(f"constructing weight_updater class={update_weight_cls.__name__}")
         self.weight_updater = update_weight_cls(
             self.args,
             self.model,
-            weights_getter=lambda: self.weights_backuper.get("actor"),
+            weights_getter=weight_update_getter,
             model_name=type(self.hf_config).__name__.lower() if self.args.model_name is None else self.args.model_name,
             quantization_config=getattr(self.hf_config, "quantization_config", None),
         )
+        _bridge_repro_trace("weight_updater constructed")
 
         # empty cache after initialization
         clear_memory()
@@ -154,6 +227,7 @@ class MegatronTrainRayActor(TrainRayActor):
             self.rollout_data_postprocess = load_function(self.args.rollout_data_postprocess_path)
 
         self.prof.on_init_end()
+        _bridge_repro_trace(f"init complete start_rollout_id={start_rollout_id}")
 
         return start_rollout_id
 
@@ -399,11 +473,20 @@ class MegatronTrainRayActor(TrainRayActor):
         )
 
     def train_actor(self, rollout_id: int, rollout_data: RolloutBatch) -> None:
-        # Create data iterator for log_probs and train.
+        # Use a tighter token cap for log-prob recomputation than for the actual
+        # train step. This reduces the packed sequence length seen by the fp32
+        # logits path without changing the training microbatch budget.
+        log_prob_max_tokens_per_gpu = getattr(self.args, "log_probs_max_tokens_per_gpu", None)
+        log_prob_data_iterator, log_prob_num_microbatches = get_data_iterator(
+            self.args,
+            self.model,
+            rollout_data,
+            max_tokens_per_gpu_override=log_prob_max_tokens_per_gpu,
+        )
         data_iterator, num_microbatches = get_data_iterator(self.args, self.model, rollout_data)
 
         if self.args.use_rollout_routing_replay:
-            self.fill_routing_replay(data_iterator, num_microbatches, rollout_data)
+            self.fill_routing_replay(log_prob_data_iterator, log_prob_num_microbatches, rollout_data)
 
         with inverse_timer("train_wait"), timer("train"):
             if self.args.compute_advantages_and_returns:
@@ -413,8 +496,8 @@ class MegatronTrainRayActor(TrainRayActor):
                     self._switch_model("ref")
                     rollout_data.update(
                         self.compute_log_prob(
-                            data_iterator,
-                            num_microbatches,
+                            log_prob_data_iterator,
+                            log_prob_num_microbatches,
                             store_prefix="ref_",
                         )
                     )
@@ -426,8 +509,8 @@ class MegatronTrainRayActor(TrainRayActor):
                     self._switch_model("teacher")
                     rollout_data.update(
                         self.compute_log_prob(
-                            data_iterator,
-                            num_microbatches,
+                            log_prob_data_iterator,
+                            log_prob_num_microbatches,
                             store_prefix="teacher_",
                         )
                     )
@@ -441,8 +524,8 @@ class MegatronTrainRayActor(TrainRayActor):
                             os.environ["ROUTING_REPLAY_STAGE"] = "record"
                     rollout_data.update(
                         self.compute_log_prob(
-                            data_iterator,
-                            num_microbatches,
+                            log_prob_data_iterator,
+                            log_prob_num_microbatches,
                             store_prefix="",
                         )
                     )

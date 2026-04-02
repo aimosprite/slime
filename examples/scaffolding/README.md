@@ -39,14 +39,19 @@ Use `examples/scaffolding/run_gpt_oss_scaffolding_modal.py` to launch the same R
 - `20b`: `2xH200`, `TP=2`, `EP=1`, `rollout_tp=2`
 - `120b`: `8xH200`, `TP=1`, `EP=8`, `rollout_tp=8`
 
-```bash
-# Optional Modal infra wiring:
-# export SLIME_MODAL_VOLUME=slime-data
-# export SLIME_MODAL_SECRET=slime-training-secrets
+From the **repo root**, the wrapper script sets volume/secret defaults and runs `modal run`:
 
+```bash
+examples/scaffolding/scripts/prep-modal.sh                    # venv + volume (once)
+examples/scaffolding/scripts/prep-modal.sh --upload-sample-data   # optional: sample JSONL on volume
+examples/scaffolding/scripts/run-gpt-oss-20b-scaffolding-modal.sh   # 20B; Hub weights + default data path
+```
+
+Or invoke Modal directly (volume `slime-data` and secret `slime-training-secrets` are wired in the `.py`):
+
+```bash
 modal run examples/scaffolding/run_gpt_oss_scaffolding_modal.py \
   --model-size 20b \
-  --hf-checkpoint /root/data/models/gpt-oss-20b \
   --data-jsonl /root/data/train_data_filtered.jsonl
 ```
 
